@@ -11,6 +11,7 @@ A simple Windows desktop voice assistant prototype that uses local audio capture
 - `core/hermes_client.py` - bridge to Hermes Agent running in WSL via CLI.
 - `core/tts.py` - abstracted text-to-speech interface using `pyttsx3`.
 - `core/conversation.py` - conversation context, personalities, and command handling.
+- `gui/hud.py` - animated Pygame JARVIS HUD, telemetry, waveform, and transcript display.
 - `personalities/` - YAML personality prompts for Jarvis and Eve.
 
 ## Prerequisites
@@ -68,9 +69,14 @@ You can optionally set a preferred `TTS_VOICE` and `TTS_RATE` in `.env`.
 python main.py
 ```
 
-2. Press and hold the configured hotkey (default `F8`) to record.
-3. Release the hotkey to stop recording and send the transcription to Hermes.
+2. Press the configured hotkey (default `F8`) once to start recording.
+3. Press it again to stop recording and send the transcription to Hermes.
 4. The assistant speaks Hermes' response out loud.
+
+The desktop HUD opens automatically and reacts to each pipeline stage: listening,
+transcribing, thinking, speaking, idle, and error. You can also click the central
+core or press Space while the HUD is focused to toggle recording. Press F11 for
+full-screen mode and Escape to close Jarvis.
 
 If `keyboard` cannot capture the hotkey, use the fallback text mode by running the script again. Then type `/record` and press Enter to start/stop audio input.
 
