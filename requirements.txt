@@ -1,0 +1,8 @@
+sounddevice
+soundfile
+numpy
+keyboard
+faster-whisper
+pyttsx3
+python-dotenv
+pyyaml
