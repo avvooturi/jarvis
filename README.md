@@ -46,6 +46,17 @@ wsl -d Ubuntu bash -lc 'hermes chat -q "..." -Q --source tool --ignore-rules --a
 If your WSL distro name is different, update `HERMES_WSL_DISTRO` in `.env`.
 If your Hermes command is installed somewhere else inside WSL, update `HERMES_COMMAND`.
 
+For predictable latency, Jarvis uses a fixed Hermes model, a 60-second timeout,
+and a small tool-turn budget. Configure these with `HERMES_MODEL`,
+`HERMES_TIMEOUT`, and `HERMES_MAX_TURNS`.
+
+### Optional fast conversation route
+
+Set `OPENROUTER_API_KEY` in `.env` to send ordinary conversational questions
+directly to the low-latency `FAST_MODEL`. Requests that appear to require files,
+applications, or other tools continue to use Hermes. If the key is absent or the
+fast request fails, Jarvis automatically falls back to Hermes.
+
 ## Configuring Whisper
 
 The default model is `small.en`, with `cpu` and `int8` compute. Change these values in `.env`:
@@ -53,6 +64,8 @@ The default model is `small.en`, with `cpu` and `int8` compute. Change these val
 - `WHISPER_MODEL`
 - `WHISPER_DEVICE`
 - `WHISPER_COMPUTE_TYPE`
+- `WHISPER_BEAM_SIZE` (`1` is fastest)
+- `WHISPER_VAD_FILTER` (ignores silence)
 
 For better accuracy and speed, choose a model that fits your local hardware.
 
@@ -60,6 +73,13 @@ For better accuracy and speed, choose a model that fits your local hardware.
 
 By default the assistant uses `pyttsx3` on Windows.
 You can optionally set a preferred `TTS_VOICE` and `TTS_RATE` in `.env`.
+
+## Spotify
+
+Jarvis handles Spotify access questions locally instead of sending them through
+the general agent. A request such as "play X on Spotify" opens that search in the
+Spotify desktop app. Direct playback and account-level control require a future
+Spotify OAuth integration.
 
 ## Running the Assistant
 

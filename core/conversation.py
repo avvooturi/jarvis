@@ -28,7 +28,8 @@ class ConversationManager:
 
     def build_prompt(self, user_text: str) -> str:
         context = '\n'.join([f'User: {item[0]}\nAssistant: {item[1]}' for item in self.history[-5:]])
-        prompt = f'{self.personality_prompt}\n{context}\nUser: {user_text}\nAssistant:'
+        voice_guidance = 'This response will be spoken aloud. Answer in at most three concise sentences unless the user explicitly asks for detail.'
+        prompt = f'{self.personality_prompt}\n{voice_guidance}\n{context}\nUser: {user_text}\nAssistant:'
         return prompt
 
     def add_turn(self, user_text: str, assistant_text: str):

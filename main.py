@@ -7,7 +7,10 @@ import time
 from config import Config
 from core.audio import AudioRecorder
 from core.conversation import ConversationManager
+from core.fast_client import FastChatClient
 from core.hermes_client import HermesClient
+from core.request_router import needs_tools
+from core.spotify import SpotifyHandler
 from core.stt import WhisperTranscriber
 from core.tts import TTS
 from gui import HudWindow
@@ -23,7 +26,7 @@ class VoiceAssistantApp:
         self.config = config
         self.logger = logging.getLogger('VoiceAssistant')
         self.audio_recorder = AudioRecorder(samplerate=config.audio_sample_rate)
-        self.transcriber = WhisperTranscriber(model_name=config.whisper_model, device=config.whisper_device, compute_type=config.whisper_compute_type)
+        self.transcriber = WhisperTranscriber(model_name=config.whisper_model, device=config.whisper_device, compute_type=config.whisper_compute_type, beam_size=config.whisper_beam_size, vad_filter=config.whisper_vad_filter)
         self.hermes = HermesClient(
             wsl_distro=config.hermes_wsl_distro,
             hermes_command=config.hermes_command,
@@ -31,11 +34,16 @@ class VoiceAssistantApp:
             model=config.hermes_model,
             session_name=config.hermes_session_name,
             extra_flags=config.hermes_extra_flags,
+            timeout=config.hermes_timeout,
+            max_turns=config.hermes_max_turns,
         )
+        self.fast_chat = FastChatClient(config.fast_api_key, config.fast_model, config.fast_timeout)
+        self.spotify = SpotifyHandler()
         self.tts = TTS(engine_name=config.tts_engine, voice=config.tts_voice, rate=config.tts_rate)
         self.conversation = ConversationManager(config)
         self.hotkey = config.hotkey.lower()
         self.recording = False
+        self.processing = False
         self.running = True
         self._lock = threading.Lock()
         self._debounce_until = 0.0
@@ -55,7 +63,7 @@ class VoiceAssistantApp:
             hotkey=self.hotkey,
         )
         if keyboard is not None:
-            keyboard.add_hotkey(self.hotkey, self._on_hotkey_pressed)
+            keyboard.add_hotkey(self.hotkey, self._on_hotkey_pressed, trigger_on_release=True)
         else:
             self.logger.warning('Global hotkey unavailable. Click the core or press Space in the HUD.')
         self._worker_thread.start()
@@ -115,11 +123,15 @@ class VoiceAssistantApp:
                     audio_path = self.audio_recorder.stop_recording()
                     self.logger.info('Stopping listening and queueing audio for processing...')
                     self._set_hud_state('transcribing', 'Decoding voice input')
-                    self._command_queue.put('process_audio')
-                    self._command_queue.put(audio_path)
+                    self.processing = True
+                    self._command_queue.put(('process_audio', audio_path))
                 except Exception as exc:
                     self.logger.error('Failed to stop recording: %s', exc)
                     self._set_hud_state('error', 'Microphone capture failed')
+                return
+
+            if self.processing:
+                self.logger.info('Jarvis is still processing the previous request; recording ignored.')
                 return
 
             self.recording = True
@@ -133,10 +145,13 @@ class VoiceAssistantApp:
                 self._set_hud_state('error', 'Microphone unavailable')
 
     def process_audio(self, audio_path: str):
+        total_started = time.perf_counter()
         self.logger.info('Transcribing audio...')
         self._set_hud_state('transcribing', 'Whisper speech recognition')
         try:
+            stage_started = time.perf_counter()
             transcript = self.transcriber.transcribe(audio_path)
+            self.logger.info('Timing: transcription %.2fs', time.perf_counter() - stage_started)
         except Exception as exc:
             self.logger.error('Speech recognition failed: %s', exc)
             self._set_hud_state('error', 'Speech recognition failed')
@@ -159,18 +174,12 @@ class VoiceAssistantApp:
             return
 
         prompt = self.conversation.build_prompt(transcript)
-        self.logger.info('Sending prompt to Hermes...')
-        self._set_hud_state('thinking', 'Hermes agent processing')
-
-        try:
-            response = self.hermes.send(prompt)
-        except RuntimeError as exc:
-            self.logger.error('Hermes request failed: %s', exc)
-            self._set_hud_state('error', 'Hermes connection failed')
+        response = self._get_response(transcript, prompt)
+        if response is None:
             return
 
         if response:
-            self.logger.info('Hermes response received.')
+            self.logger.info('Response ready for delivery.')
             self.conversation.add_turn(transcript, response)
             if self.hud is not None:
                 self.hud.add_exchange(transcript, response)
@@ -178,8 +187,9 @@ class VoiceAssistantApp:
                 self.logger.info('Speaking response...')
                 self._set_hud_state('speaking', 'Synthesizing voice response')
                 try:
+                    stage_started = time.perf_counter()
                     self.tts.speak(response)
-                    self.logger.info('Finished speaking response.')
+                    self.logger.info('Finished speaking response. Timing: TTS %.2fs; total %.2fs', time.perf_counter() - stage_started, time.perf_counter() - total_started)
                     self._set_hud_state('idle', 'Standing by')
                 except Exception as exc:
                     self.logger.error('Text-to-speech failed: %s', exc)
@@ -194,18 +204,55 @@ class VoiceAssistantApp:
     def _worker_loop(self):
         while self.running:
             try:
-                action = self._command_queue.get(timeout=0.1)
+                command = self._command_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+            action, payload = command if isinstance(command, tuple) else (command, None)
             if action == 'process_audio':
-                audio_path = self._command_queue.get()
                 try:
-                    self.process_audio(audio_path)
+                    self.process_audio(payload)
                 except Exception:
                     self.logger.exception('Unexpected error while processing audio.')
                     self._set_hud_state('error', 'Processing fault')
+                finally:
+                    self.processing = False
             elif action == 'quit':
                 self.running = False
+
+    def _get_response(self, transcript: str, prompt: str):
+        if self.spotify.can_handle(transcript):
+            response = self.spotify.handle(transcript)
+            if response:
+                self.logger.info('Spotify request handled locally.')
+                return response
+
+        tool_request = needs_tools(transcript)
+        stage_started = time.perf_counter()
+        if not tool_request and self.fast_chat.available:
+            self.logger.info('Sending prompt through fast OpenRouter route (%s)...', self.config.fast_model)
+            self._set_hud_state('thinking', 'Fast model processing')
+            try:
+                response = self.fast_chat.send(
+                    self.conversation.personality_prompt + '\nAnswer in at most three concise sentences.',
+                    self.conversation.history,
+                    transcript,
+                )
+                self.logger.info('Fast response received. Timing: model %.2fs', time.perf_counter() - stage_started)
+                return response
+            except Exception as exc:
+                self.logger.warning('Fast route failed; falling back to Hermes: %s', exc)
+
+        turns = self.config.hermes_max_turns if tool_request else 1
+        self.logger.info('Sending prompt to Hermes (max turns: %d)...', turns)
+        self._set_hud_state('thinking', 'Hermes agent processing')
+        try:
+            response = self.hermes.send(prompt, max_turns=turns)
+            self.logger.info('Hermes response received. Timing: model %.2fs', time.perf_counter() - stage_started)
+            return response
+        except RuntimeError as exc:
+            self.logger.error('Hermes request failed: %s', exc)
+            self._set_hud_state('error', 'Hermes connection failed')
+            return None
 
     def _handle_command_result(self, result: dict):
         if result['action'] == 'quit':
