@@ -4,3 +4,4 @@ __pycache__/
 *.pyd
 .env
 temp_recording_*.wav
+interview_sessions/

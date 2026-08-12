@@ -12,11 +12,14 @@ class _SpeechRequest:
 
 
 class TTS:
-    def __init__(self, engine_name: str = 'pyttsx3', voice: str = '', rate: int = 160):
+    def __init__(self, engine_name: str = 'pyttsx3', voice: str = '', rate: int = 160,
+                 fast_rate: int = 230, fast_word_threshold: int = 50):
         self.logger = logging.getLogger('TTS')
         self.engine_name = engine_name
         self.voice = voice
         self.rate = rate
+        self.fast_rate = fast_rate
+        self.fast_word_threshold = fast_word_threshold
         if engine_name != 'pyttsx3':
             raise ValueError(f'Unsupported TTS engine: {engine_name}')
         self._queue = queue.Queue()
@@ -52,8 +55,11 @@ class TTS:
                 engine = pyttsx3.init()
                 if self.voice:
                     self._set_voice(engine, self.voice)
-                if self.rate:
-                    engine.setProperty('rate', self.rate)
+                word_count = len(request.text.split())
+                speech_rate = self.fast_rate if word_count > self.fast_word_threshold else self.rate
+                if speech_rate:
+                    engine.setProperty('rate', speech_rate)
+                self.logger.info('Speaking %d words at rate %d.', word_count, speech_rate)
                 engine.say(request.text)
                 engine.runAndWait()
             except Exception as exc:
@@ -89,7 +95,7 @@ class TTS:
         if not request.done.wait(timeout=180):
             raise RuntimeError('TTS playback timed out')
         if request.error is not None:
-            raise RuntimeError('TTS playback failed') from request.error
+            raise RuntimeError(f'TTS playback failed: {request.error}') from request.error
 
     def close(self):
         if self._closed:

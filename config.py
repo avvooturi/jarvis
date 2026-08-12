@@ -33,6 +33,8 @@ class Config:
     tts_engine: str
     tts_voice: str
     tts_rate: int
+    tts_fast_rate: int
+    tts_fast_word_threshold: int
     hotkey: str
     default_personality: str
     personalities_dir: Path
@@ -60,6 +62,8 @@ class Config:
             tts_engine=_get_env('TTS_ENGINE', 'pyttsx3'),
             tts_voice=_get_env('TTS_VOICE', ''),
             tts_rate=int(_get_env('TTS_RATE', '190')),
+            tts_fast_rate=int(_get_env('TTS_FAST_RATE', '230')),
+            tts_fast_word_threshold=int(_get_env('TTS_FAST_WORD_THRESHOLD', '50')),
             hotkey=_get_env('HOTKEY', 'f8'),
             default_personality=_get_env('DEFAULT_PERSONALITY', 'jarvis'),
             personalities_dir=Path(_get_env('PERSONALITIES_DIR', 'personalities')),

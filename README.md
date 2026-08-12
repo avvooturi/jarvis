@@ -73,6 +73,9 @@ For better accuracy and speed, choose a model that fits your local hardware.
 
 By default the assistant uses `pyttsx3` on Windows.
 You can optionally set a preferred `TTS_VOICE` and `TTS_RATE` in `.env`.
+Responses longer than `TTS_FAST_WORD_THRESHOLD` words use `TTS_FAST_RATE`,
+allowing long answers to play faster without rushing short conversational replies.
+
 
 ## Spotify
 
@@ -98,6 +101,10 @@ transcribing, thinking, speaking, idle, and error. You can also click the centra
 core or press Space while the HUD is focused to toggle recording. Press F11 for
 full-screen mode and Escape to close Jarvis.
 
+Click the `COMMAND //` field at the bottom of the HUD to type requests or slash
+commands, then press Enter. Typed and spoken input share conversation history,
+interview mode, agent routing, transcript display, and voice output.
+
 If `keyboard` cannot capture the hotkey, use the fallback text mode by running the script again. Then type `/record` and press Enter to start/stop audio input.
 
 ## Switching Personalities
@@ -109,6 +116,19 @@ Use voice commands during a session:
 - `/mute` - disable spoken output
 - `/unmute` - re-enable spoken output
 - `/quit` - exit cleanly
+
+## System Design Interview Mode
+
+Say `/interview` or "start a system design interview" to begin a stateful mock
+interview. Jarvis presents a problem, asks one focused question at a time, and
+challenges requirements, estimates, APIs, data models, architecture, scalability,
+reliability, and tradeoffs without revealing the solution.
+
+- `/hint` or "give me a hint" provides one small nudge.
+- `/endinterview` or "end the interview" generates the final rubric and exits interview mode.
+
+Each completed evaluation and transcript is saved locally as Markdown and JSON
+under `interview_sessions/`. That directory is ignored by Git.
 
 ## Troubleshooting Windows Microphone/Audio
 

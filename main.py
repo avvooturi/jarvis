@@ -39,7 +39,13 @@ class VoiceAssistantApp:
         )
         self.fast_chat = FastChatClient(config.fast_api_key, config.fast_model, config.fast_timeout)
         self.spotify = SpotifyHandler()
-        self.tts = TTS(engine_name=config.tts_engine, voice=config.tts_voice, rate=config.tts_rate)
+        self.tts = TTS(
+            engine_name=config.tts_engine,
+            voice=config.tts_voice,
+            rate=config.tts_rate,
+            fast_rate=config.tts_fast_rate,
+            fast_word_threshold=config.tts_fast_word_threshold,
+        )
         self.conversation = ConversationManager(config)
         self.hotkey = config.hotkey.lower()
         self.recording = False
@@ -53,10 +59,11 @@ class VoiceAssistantApp:
 
     def run(self):
         self.logger.info('Starting voice assistant. Press %s once to start listening, again to stop and send.', self.hotkey.upper())
-        self.logger.info('Use /jarvis, /eve, /mute, /unmute, /quit as voice or keyboard commands.')
+        self.logger.info('Use /interview, /endinterview, /hint, /jarvis, /eve, /mute, /unmute, /quit as commands.')
 
         self.hud = HudWindow(
             on_toggle_recording=self._on_hotkey_pressed,
+            on_submit_text=self._on_text_submitted,
             on_close=self.stop,
             model=self.config.hermes_model,
             personality=self.conversation.personality,
@@ -144,6 +151,20 @@ class VoiceAssistantApp:
                 self.recording = False
                 self._set_hud_state('error', 'Microphone unavailable')
 
+    def _on_text_submitted(self, text):
+        text = text.strip()
+        if not text:
+            return False
+        with self._lock:
+            if self.recording or self.processing:
+                self.logger.info('Jarvis is busy; typed command ignored.')
+                return False
+            self.processing = True
+            self.logger.info('Typed command: %s', text)
+            self._set_hud_state('thinking', 'Processing typed command')
+            self._command_queue.put(('process_text', text))
+            return True
+
     def process_audio(self, audio_path: str):
         total_started = time.perf_counter()
         self.logger.info('Transcribing audio...')
@@ -166,9 +187,17 @@ class VoiceAssistantApp:
 
         self.logger.info('Transcript: %s', transcript)
 
+        self.process_text(transcript, total_started)
+
+    def process_text(self, transcript: str, total_started=None):
+        if total_started is None:
+            total_started = time.perf_counter()
+
         command_result = self.conversation.handle_command(transcript)
         if command_result is not None:
-            self._handle_command_result(command_result)
+            response = self._handle_command_result(command_result)
+            if response:
+                self._deliver_response(transcript, response, total_started)
             if self.running:
                 self._set_hud_state('idle', 'Command acknowledged')
             return
@@ -179,24 +208,7 @@ class VoiceAssistantApp:
             return
 
         if response:
-            self.logger.info('Response ready for delivery.')
-            self.conversation.add_turn(transcript, response)
-            if self.hud is not None:
-                self.hud.add_exchange(transcript, response)
-            if not self.conversation.is_muted:
-                self.logger.info('Speaking response...')
-                self._set_hud_state('speaking', 'Synthesizing voice response')
-                try:
-                    stage_started = time.perf_counter()
-                    self.tts.speak(response)
-                    self.logger.info('Finished speaking response. Timing: TTS %.2fs; total %.2fs', time.perf_counter() - stage_started, time.perf_counter() - total_started)
-                    self._set_hud_state('idle', 'Standing by')
-                except Exception as exc:
-                    self.logger.error('Text-to-speech failed: %s', exc)
-                    self._set_hud_state('error', 'Voice synthesis failed')
-            else:
-                self.logger.info('Muted: response not spoken.')
-                self._set_hud_state('idle', 'Response received // audio muted')
+            self._deliver_response(transcript, response, total_started)
         else:
             self.logger.warning('Hermes returned an empty response.')
             self._set_hud_state('error', 'Empty agent response')
@@ -216,6 +228,14 @@ class VoiceAssistantApp:
                     self._set_hud_state('error', 'Processing fault')
                 finally:
                     self.processing = False
+            elif action == 'process_text':
+                try:
+                    self.process_text(payload)
+                except Exception:
+                    self.logger.exception('Unexpected error while processing typed command.')
+                    self._set_hud_state('error', 'Processing fault')
+                finally:
+                    self.processing = False
             elif action == 'quit':
                 self.running = False
 
@@ -226,15 +246,15 @@ class VoiceAssistantApp:
                 self.logger.info('Spotify request handled locally.')
                 return response
 
-        tool_request = needs_tools(transcript)
+        tool_request = needs_tools(transcript) and not self.conversation.interview.active
         stage_started = time.perf_counter()
         if not tool_request and self.fast_chat.available:
             self.logger.info('Sending prompt through fast OpenRouter route (%s)...', self.config.fast_model)
             self._set_hud_state('thinking', 'Fast model processing')
             try:
                 response = self.fast_chat.send(
-                    self.conversation.personality_prompt + '\nAnswer in at most three concise sentences.',
-                    self.conversation.history,
+                    self.conversation.system_prompt + '\nAnswer in at most three concise sentences.',
+                    self.conversation.interview.turns if self.conversation.interview.active else self.conversation.history,
                     transcript,
                 )
                 self.logger.info('Fast response received. Timing: model %.2fs', time.perf_counter() - stage_started)
@@ -273,10 +293,62 @@ class VoiceAssistantApp:
             self.logger.info('Switched personality to %s.', result['value'])
         elif result['action'] == 'message':
             self.logger.info(result['value'])
+            return result['value']
+        elif result['action'] == 'interview_start':
+            self.conversation.interview.start()
+            if self.hud is not None:
+                self.hud.set_mode('INTERVIEW')
+            self.logger.info('System-design interview mode started.')
+            prompt_text = 'Begin the interview now. Choose one realistic system-design problem, state it briefly, and ask me to clarify requirements.'
+            return self._get_response(prompt_text, self.conversation.build_prompt(prompt_text))
+        elif result['action'] == 'interview_hint':
+            prompt_text = 'Give me one small hint based on where I am stuck, without revealing the solution.'
+            return self._get_response(prompt_text, self.conversation.build_prompt(prompt_text))
+        elif result['action'] == 'interview_end':
+            self.logger.info('Generating system-design interview evaluation...')
+            self._set_hud_state('thinking', 'Evaluating interview performance')
+            evaluation_prompt = self.conversation.interview.evaluation_prompt()
+            try:
+                if self.fast_chat.available:
+                    evaluation = self.fast_chat.send(
+                        'You are a candid senior system-design interview evaluator.', [], evaluation_prompt,
+                        max_tokens=900,
+                    )
+                else:
+                    evaluation = self.hermes.send(evaluation_prompt, max_turns=1)
+            except Exception as exc:
+                self.logger.error('Interview evaluation failed: %s', exc)
+                return 'The interview ended, but I could not generate the evaluation.'
+            report_path = self.conversation.interview.finish(evaluation)
+            if self.hud is not None:
+                self.hud.set_mode('ASSISTANT')
+            self.logger.info('Interview report saved to %s', report_path)
+            return evaluation
+
+    def _deliver_response(self, transcript, response, total_started):
+        self.logger.info('Response ready for delivery.')
+        self.conversation.add_turn(transcript, response)
+        if self.hud is not None:
+            self.hud.add_exchange(transcript, response)
+        if self.conversation.is_muted:
+            self.logger.info('Muted: response not spoken.')
+            self._set_hud_state('idle', 'Response received // audio muted')
+            return
+        self.logger.info('Speaking response...')
+        self._set_hud_state('speaking', 'Synthesizing voice response')
+        try:
+            stage_started = time.perf_counter()
+            self.tts.speak(response)
+            self.logger.info('Finished speaking response. Timing: TTS %.2fs; total %.2fs', time.perf_counter() - stage_started, time.perf_counter() - total_started)
+            self._set_hud_state('idle', 'Standing by')
+        except Exception as exc:
+            self.logger.error('Text-to-speech failed: %s', exc)
+            self._set_hud_state('error', 'Voice synthesis failed')
 
     def _set_hud_state(self, state: str, detail: str = None):
         if self.hud is not None:
             self.hud.set_state(state, detail)
+
 
 
 def configure_logging():

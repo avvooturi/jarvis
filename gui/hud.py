@@ -155,8 +155,9 @@ class HudPanel:
 class HudWindow:
     """Thread-safe, state-reactive Pygame HUD for the voice pipeline."""
 
-    def __init__(self, on_toggle_recording, on_close, model, personality, hotkey='F8'):
+    def __init__(self, on_toggle_recording, on_submit_text, on_close, model, personality, hotkey='F8'):
         self.on_toggle_recording = on_toggle_recording
+        self.on_submit_text = on_submit_text
         self.on_close = on_close
         self.model = model
         self.personality = personality.upper()
@@ -164,6 +165,7 @@ class HudWindow:
         self.state = 'idle'
         self.last_command = 'Awaiting voice directive'
         self.current_task = 'Standing by'
+        self.mode = 'ASSISTANT'
         self.transcript = deque(maxlen=6)
         self.events = queue.Queue()
         self.phase = 0
@@ -172,6 +174,8 @@ class HudWindow:
         self.waveform = VoiceWaveform(self.rng)
         self.running = True
         self.fullscreen = False
+        self.input_text = ''
+        self.input_focused = False
 
         pygame.init()
         pygame.display.set_caption('JARVIS // Tactical Intelligence Interface')
@@ -179,6 +183,7 @@ class HudWindow:
         size = (max(1000, min(info.current_w, 1600)), max(650, min(info.current_h-70, 900)))
         self.screen = pygame.display.set_mode(size, pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
+        pygame.key.start_text_input()
 
     def run(self):
         while self.running:
@@ -202,6 +207,9 @@ class HudWindow:
     def set_personality(self, personality):
         self.events.put(('personality', personality))
 
+    def set_mode(self, mode):
+        self.events.put(('mode', mode))
+
     def request_close(self):
         self.events.put(('close',))
 
@@ -211,10 +219,17 @@ class HudWindow:
                 self.on_close()
                 self.running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if self.input_focused and event.key == pygame.K_RETURN:
+                    self._submit_input()
+                elif self.input_focused and event.key == pygame.K_BACKSPACE:
+                    self.input_text = self.input_text[:-1]
+                elif self.input_focused and event.key == pygame.K_ESCAPE:
+                    self.input_text = ''
+                    self.input_focused = False
+                elif event.key == pygame.K_ESCAPE:
                     self.on_close()
                     self.running = False
-                elif event.key == pygame.K_SPACE:
+                elif event.key == pygame.K_SPACE and not self.input_focused:
                     self.on_toggle_recording()
                 elif event.key == pygame.K_F11:
                     self.fullscreen = not self.fullscreen
@@ -222,9 +237,24 @@ class HudWindow:
                     self.screen = pygame.display.set_mode((0, 0) if self.fullscreen else (1400, 820), flags)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 width, height = self.screen.get_size()
+                input_rect = pygame.Rect(28, height-54, width-56, 36)
+                if input_rect.collidepoint(event.pos):
+                    self.input_focused = True
+                    continue
+                self.input_focused = False
                 cx, cy = width/2, 70+(height-240)*0.43
                 if math.hypot(event.pos[0]-cx, event.pos[1]-cy) < min(width, height)*0.18:
                     self.on_toggle_recording()
+            elif event.type == pygame.TEXTINPUT and self.input_focused:
+                if len(self.input_text) < 500:
+                    self.input_text += event.text
+
+    def _submit_input(self):
+        text = self.input_text.strip()
+        if not text:
+            return
+        if self.on_submit_text(text) is not False:
+            self.input_text = ''
 
     def _drain_events(self):
         while True:
@@ -243,6 +273,8 @@ class HudWindow:
                 self.transcript.append(('JARVIS', assistant_text))
             elif event[0] == 'personality':
                 self.personality = event[1].upper()
+            elif event[0] == 'mode':
+                self.mode = event[1]
             elif event[0] == 'close':
                 self.running = False
 
@@ -283,7 +315,7 @@ class HudWindow:
         _text(self.screen, f'HERMES: ONLINE    OPENROUTER: ONLINE    MIC: {mic_status}', (width-24, 21), 9, CYAN, 'midright')
 
         margin, panel_w = 28, max(225, int(width*0.215))
-        top, bottom = 70, height-170
+        top, bottom = 70, height-205
         left = pygame.Rect(margin, top, panel_w, bottom-top)
         right = pygame.Rect(width-margin-panel_w, top, panel_w, bottom-top)
         HudPanel.draw(self.screen, left, 'SYSTEM TELEMETRY')
@@ -298,8 +330,8 @@ class HudWindow:
         _text(self.screen, 'VOICE INPUT', (left.x+18, bottom-72), 8, MUTED)
         self.waveform.draw(self.screen, left.x+18, bottom-35, left.right-18)
 
-        details = [('PERSONALITY', self.personality), ('MODEL', self.model.upper()),
-                   ('AGENT', 'HERMES'), ('PIPELINE', 'WHISPER // TTS'),
+        details = [('MODE', self.mode), ('MODEL', self.model.upper()),
+                   ('AGENT', 'HERMES'), ('VOICE', 'WINDOWS // READY'),
                    ('STATUS', self.state.upper()), ('COMMAND', self.last_command)]
         for index, (label, value) in enumerate(details):
             y = top+64+index*54
@@ -315,7 +347,7 @@ class HudWindow:
         _text(self.screen, STATE_LABELS.get(self.state, self.state.upper()), (cx, cy+radius+38), 13, state_color, 'center', True)
         _text(self.screen, f'PRESS {self.hotkey} OR CLICK CORE TO TOGGLE VOICE CAPTURE', (cx, cy+radius+60), 8, MUTED, 'center')
 
-        transcript_rect = pygame.Rect(margin, height-145, width-margin*2, 117)
+        transcript_rect = pygame.Rect(margin, height-180, width-margin*2, 112)
         HudPanel.draw(self.screen, transcript_rect, 'NEURAL LINK // RECENT EXCHANGE')
         if not self.transcript:
             _text(self.screen, 'SYSTEM // Voice channel ready. Awaiting directive.', (transcript_rect.x+18, transcript_rect.y+62), 9, MUTED, 'midleft')
@@ -325,4 +357,15 @@ class HudWindow:
                 y = transcript_rect.y+47+index*24
                 _text(self.screen, f'{speaker} //', (transcript_rect.x+18, y), 9, CYAN if speaker == 'JARVIS' else TEXT, 'midleft', True)
                 _text(self.screen, _ellipsize(value, max_chars), (transcript_rect.x+105, y), 9, MUTED if speaker == 'JARVIS' else TEXT, 'midleft')
-        self.waveform.draw(self.screen, int(width*.64), height-39, width-margin, CYAN_DIM)
+        input_rect = pygame.Rect(margin, height-54, width-margin*2, 36)
+        pygame.draw.rect(self.screen, (3, 15, 22), input_rect)
+        pygame.draw.rect(self.screen, CYAN if self.input_focused else CYAN_DARK, input_rect, 1)
+        prefix = 'COMMAND // '
+        _text(self.screen, prefix, (input_rect.x+12, input_rect.centery), 9, CYAN, 'midleft', True)
+        display = self.input_text if self.input_text else 'Type a command and press Enter...'
+        color = TEXT if self.input_text else MUTED
+        max_chars = max(20, (input_rect.width-125)//8)
+        _text(self.screen, _ellipsize(display, max_chars), (input_rect.x+108, input_rect.centery), 9, color, 'midleft')
+        if self.input_focused and (self.phase//15) % 2 == 0:
+            cursor_x = min(input_rect.right-12, input_rect.x+108+_font(9).size(self.input_text)[0]+2)
+            pygame.draw.line(self.screen, CYAN, (cursor_x, input_rect.y+9), (cursor_x, input_rect.bottom-9), 1)

@@ -11,7 +11,7 @@ class FastChatClient:
     def available(self):
         return bool(self.api_key)
 
-    def send(self, system_prompt: str, history, user_text: str) -> str:
+    def send(self, system_prompt: str, history, user_text: str, max_tokens: int = 180) -> str:
         if not self.available:
             raise RuntimeError('OPENROUTER_API_KEY is not configured')
         messages = [{'role': 'system', 'content': system_prompt}]
@@ -21,7 +21,7 @@ class FastChatClient:
         response = httpx.post(
             'https://openrouter.ai/api/v1/chat/completions',
             headers={'Authorization': f'Bearer {self.api_key}'},
-            json={'model': self.model, 'messages': messages, 'max_tokens': 180, 'temperature': 0.4},
+            json={'model': self.model, 'messages': messages, 'max_tokens': max_tokens, 'temperature': 0.4},
             timeout=self.timeout,
         )
         response.raise_for_status()

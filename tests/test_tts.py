@@ -62,6 +62,35 @@ class TestTTS(unittest.TestCase):
             ['first', 'second'],
         )
 
+    def test_long_responses_use_faster_rate(self):
+        engines = []
+
+        def create_engine():
+            engine = FakeEngine()
+            engines.append(engine)
+            return engine
+
+        fake_pyttsx3 = types.SimpleNamespace(init=create_engine)
+        short_text = ' '.join(['short'] * 50)
+        long_text = ' '.join(['long'] * 51)
+
+        with patch.dict(sys.modules, {'pyttsx3': fake_pyttsx3}):
+            tts = TTS(rate=190, fast_rate=230, fast_word_threshold=50)
+            try:
+                tts.speak(short_text)
+                tts.speak(long_text)
+            finally:
+                tts.close()
+
+        rates = [
+            call[2]
+            for engine in engines
+            for call in engine.calls
+            if call[0] == 'setProperty' and call[1] == 'rate'
+        ]
+        self.assertEqual(rates, [190, 230])
+
+
 
 if __name__ == '__main__':
     unittest.main()
