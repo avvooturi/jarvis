@@ -104,6 +104,8 @@ full-screen mode and Escape to close Jarvis.
 Click the `COMMAND //` field at the bottom of the HUD to type requests or slash
 commands, then press Enter. Typed and spoken input share conversation history,
 interview mode, agent routing, transcript display, and voice output.
+Use the `EXPAND` button on `NEURAL LINK // RECENT EXCHANGE` to enlarge the
+conversation history panel. Select `COLLAPSE` to return to the standard HUD.
 
 If `keyboard` cannot capture the hotkey, use the fallback text mode by running the script again. Then type `/record` and press Enter to start/stop audio input.
 
@@ -129,6 +131,20 @@ reliability, and tradeoffs without revealing the solution.
 
 Each completed evaluation and transcript is saved locally as Markdown and JSON
 under `interview_sessions/`. That directory is ignored by Git.
+
+## Persistent Memory
+
+Jarvis stores conversation sessions and structured interview results locally in
+`data/jarvis_memory.db`. On startup it restores a small recent context window;
+interview prompts also receive a compact learning profile based on rubric scores,
+not the entire transcript history. The database and reports are ignored by Git.
+
+- `/memory` summarizes what is stored and your learning profile.
+- `/progress` shows strengths, priority areas, and score trends.
+- `/lastinterview` retrieves the latest evaluation.
+- `/forgetlast` deletes the previous saved conversation session.
+- `/forgetall` asks for confirmation before deleting all memory and progress.
+- `/confirmforgetall` confirms that permanent deletion.
 
 ## Troubleshooting Windows Microphone/Audio
 

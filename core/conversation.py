@@ -4,6 +4,7 @@ from pathlib import Path
 
 from config import Config
 from core.interview import INTERVIEW_PROMPT, InterviewSession
+from core.memory import MemoryStore
 
 
 class ConversationManager:
@@ -15,6 +16,9 @@ class ConversationManager:
         self.personality = config.default_personality
         self.personality_prompt = self._load_personality(self.personality)
         self.interview = InterviewSession()
+        self.memory = MemoryStore(config.memory_db_path)
+        self.history = self.memory.recent_conversations(limit=5)
+        self._confirm_forget_all = False
 
     def _load_personality(self, personality_name: str) -> str:
         persona_file = self.config.personalities_dir / f'{personality_name}.yaml'
@@ -38,15 +42,35 @@ class ConversationManager:
 
     @property
     def system_prompt(self):
-        return INTERVIEW_PROMPT if self.interview.active else self.personality_prompt
+        if self.interview.active:
+            return f'{INTERVIEW_PROMPT}\n\nCANDIDATE LEARNING PROFILE:\n{self.memory.learning_profile()}'
+        return self.personality_prompt
 
     def add_turn(self, user_text: str, assistant_text: str):
         self.history.append((user_text, assistant_text))
         self.interview.add_turn(user_text, assistant_text)
+        mode = 'interview' if self.interview.active else 'assistant'
+        self.memory.add_conversation(user_text, assistant_text, mode, self.personality)
 
     def handle_command(self, text: str):
         lowered = text.strip().lower()
         normalized = lowered.strip(' .!?')
+        if normalized in {'/memory', 'memory', 'what do you remember about me'}:
+            return {'action': 'memory_summary'}
+        if normalized in {'/progress', 'progress', 'how have my scores changed', 'what should i practice next'}:
+            return {'action': 'memory_progress'}
+        if normalized in {'/lastinterview', '/last interview', 'show my last interview'}:
+            return {'action': 'memory_last_interview'}
+        if normalized in {'/forgetlast', '/forget last', 'forget the last session'}:
+            return {'action': 'memory_forget_last'}
+        if normalized in {'/forgetall', '/forget all', 'forget everything'}:
+            self._confirm_forget_all = True
+            return {'action': 'message', 'value': 'This will permanently delete all saved conversations and interview progress. Type /confirmforgetall to continue.'}
+        if normalized in {'/confirmforgetall', '/confirm forget all'}:
+            if self._confirm_forget_all:
+                self._confirm_forget_all = False
+                return {'action': 'memory_forget_all'}
+            return {'action': 'message', 'value': 'No memory deletion is awaiting confirmation.'}
         if normalized in {'/interview', 'slash interview', 'start interview', 'start an interview', 'start system design interview', 'start a system design interview'}:
             return {'action': 'interview_start'}
         if normalized in {'/endinterview', '/end interview', 'slash end interview', 'end interview', 'end the interview', 'finish interview', 'finish the interview'}:

@@ -69,6 +69,7 @@ class VoiceAssistantApp:
             personality=self.conversation.personality,
             hotkey=self.hotkey,
         )
+        self.hud.set_progress(self.conversation.memory.learning_profile())
         if keyboard is not None:
             keyboard.add_hotkey(self.hotkey, self._on_hotkey_pressed, trigger_on_release=True)
         else:
@@ -85,6 +86,7 @@ class VoiceAssistantApp:
                 keyboard.unhook_all_hotkeys()
             self.audio_recorder.close()
             self.tts.close()
+            self.conversation.memory.close()
             self.logger.info('Stopped voice assistant.')
 
     def stop(self):
@@ -319,11 +321,35 @@ class VoiceAssistantApp:
             except Exception as exc:
                 self.logger.error('Interview evaluation failed: %s', exc)
                 return 'The interview ended, but I could not generate the evaluation.'
-            report_path = self.conversation.interview.finish(evaluation)
+            result_data = self.conversation.interview.finish(evaluation)
+            self.conversation.memory.add_interview(
+                result_data['started_at'], result_data['ended_at'], result_data['duration_seconds'],
+                result_data['turns'], result_data['evaluation'],
+            )
             if self.hud is not None:
                 self.hud.set_mode('ASSISTANT')
-            self.logger.info('Interview report saved to %s', report_path)
+                self.hud.set_progress(self.conversation.memory.learning_profile())
+            self.logger.info('Interview report saved to %s', result_data['report_path'])
             return evaluation
+        elif result['action'] == 'memory_summary':
+            recent = len(self.conversation.memory.recent_conversations(limit=100))
+            return f'I have {recent} recent saved conversation turns. {self.conversation.memory.learning_profile()}'
+        elif result['action'] == 'memory_progress':
+            return self.conversation.memory.progress_summary()
+        elif result['action'] == 'memory_last_interview':
+            row = self.conversation.memory.last_interview()
+            if row is None:
+                return 'No completed interview is saved yet.'
+            return row['evaluation']
+        elif result['action'] == 'memory_forget_last':
+            removed = self.conversation.memory.forget_last_session()
+            return 'The previous saved session was deleted.' if removed else 'There is no previous session to delete.'
+        elif result['action'] == 'memory_forget_all':
+            self.conversation.memory.forget_all()
+            self.conversation.history = []
+            if self.hud is not None:
+                self.hud.set_progress('NO INTERVIEW DATA')
+            return 'All saved conversations and interview progress have been permanently deleted.'
 
     def _deliver_response(self, transcript, response, total_started):
         self.logger.info('Response ready for delivery.')

@@ -54,6 +54,24 @@ def _ellipsize(value, max_chars):
     return value if len(value) <= max_chars else value[:max(1, max_chars-1)] + '…'
 
 
+def _wrap_text(value, max_chars):
+    lines = []
+    for paragraph in str(value).split('\n'):
+        words = paragraph.split()
+        if not words:
+            lines.append('')
+            continue
+        line = words[0]
+        for word in words[1:]:
+            if len(line) + len(word) + 1 <= max_chars:
+                line += ' ' + word
+            else:
+                lines.append(line)
+                line = word
+        lines.append(line)
+    return lines or ['']
+
+
 class CircularGauge:
     def __init__(self, label, unit='%', color=CYAN):
         self.label = label
@@ -166,6 +184,7 @@ class HudWindow:
         self.last_command = 'Awaiting voice directive'
         self.current_task = 'Standing by'
         self.mode = 'ASSISTANT'
+        self.progress = 'NO INTERVIEW DATA'
         self.transcript = deque(maxlen=6)
         self.events = queue.Queue()
         self.phase = 0
@@ -176,6 +195,7 @@ class HudWindow:
         self.fullscreen = False
         self.input_text = ''
         self.input_focused = False
+        self.exchange_expanded = False
 
         pygame.init()
         pygame.display.set_caption('JARVIS // Tactical Intelligence Interface')
@@ -210,6 +230,9 @@ class HudWindow:
     def set_mode(self, mode):
         self.events.put(('mode', mode))
 
+    def set_progress(self, progress):
+        self.events.put(('progress', progress))
+
     def request_close(self):
         self.events.put(('close',))
 
@@ -237,7 +260,13 @@ class HudWindow:
                     self.screen = pygame.display.set_mode((0, 0) if self.fullscreen else (1400, 820), flags)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 width, height = self.screen.get_size()
-                input_rect = pygame.Rect(28, height-54, width-56, 36)
+                input_rect = self._input_rect(width, height)
+                exchange_rect = self._recent_exchange_rect(width, height)
+                expand_rect = self._exchange_expand_rect(exchange_rect)
+                if expand_rect.collidepoint(event.pos):
+                    self.exchange_expanded = not self.exchange_expanded
+                    self.input_focused = False
+                    continue
                 if input_rect.collidepoint(event.pos):
                     self.input_focused = True
                     continue
@@ -246,8 +275,20 @@ class HudWindow:
                 if math.hypot(event.pos[0]-cx, event.pos[1]-cy) < min(width, height)*0.18:
                     self.on_toggle_recording()
             elif event.type == pygame.TEXTINPUT and self.input_focused:
-                if len(self.input_text) < 500:
+                if len(self.input_text) < 2000:
                     self.input_text += event.text
+
+    def _input_rect(self, width, height):
+        return pygame.Rect(28, height-54, width-56, 36)
+
+    def _recent_exchange_rect(self, width, height):
+        if self.exchange_expanded:
+            return pygame.Rect(28, 58, width-56, height-124)
+        return pygame.Rect(28, height-180, width-56, 112)
+
+    @staticmethod
+    def _exchange_expand_rect(exchange_rect):
+        return pygame.Rect(exchange_rect.right-94, exchange_rect.y+8, 78, 22)
 
     def _submit_input(self):
         text = self.input_text.strip()
@@ -275,6 +316,8 @@ class HudWindow:
                 self.personality = event[1].upper()
             elif event[0] == 'mode':
                 self.mode = event[1]
+            elif event[0] == 'progress':
+                self.progress = event[1]
             elif event[0] == 'close':
                 self.running = False
 
@@ -332,7 +375,7 @@ class HudWindow:
 
         details = [('MODE', self.mode), ('MODEL', self.model.upper()),
                    ('AGENT', 'HERMES'), ('VOICE', 'WINDOWS // READY'),
-                   ('STATUS', self.state.upper()), ('COMMAND', self.last_command)]
+                   ('STATUS', self.state.upper()), ('GROWTH', self.progress)]
         for index, (label, value) in enumerate(details):
             y = top+64+index*54
             _text(self.screen, label, (right.x+18, y), 8, MUTED)
@@ -347,25 +390,46 @@ class HudWindow:
         _text(self.screen, STATE_LABELS.get(self.state, self.state.upper()), (cx, cy+radius+38), 13, state_color, 'center', True)
         _text(self.screen, f'PRESS {self.hotkey} OR CLICK CORE TO TOGGLE VOICE CAPTURE', (cx, cy+radius+60), 8, MUTED, 'center')
 
-        transcript_rect = pygame.Rect(margin, height-180, width-margin*2, 112)
+        transcript_rect = self._recent_exchange_rect(width, height)
         HudPanel.draw(self.screen, transcript_rect, 'NEURAL LINK // RECENT EXCHANGE')
+        expand_rect = self._exchange_expand_rect(transcript_rect)
+        pygame.draw.rect(self.screen, (5, 28, 38), expand_rect)
+        pygame.draw.rect(self.screen, CYAN_DARK, expand_rect, 1)
+        _text(self.screen, 'COLLAPSE' if self.exchange_expanded else 'EXPAND', expand_rect.center, 8, CYAN, 'center', True)
         if not self.transcript:
             _text(self.screen, 'SYSTEM // Voice channel ready. Awaiting directive.', (transcript_rect.x+18, transcript_rect.y+62), 9, MUTED, 'midleft')
+        elif self.exchange_expanded:
+            max_chars = max(60, (transcript_rect.width-145)//8)
+            lines = []
+            for speaker, value in self.transcript:
+                wrapped = _wrap_text(value, max_chars)
+                lines.append((f'{speaker} //', wrapped[0], speaker))
+                lines.extend(('', line, speaker) for line in wrapped[1:])
+                lines.append(('', '', speaker))
+            visible_count = max(1, (transcript_rect.height-62)//22)
+            for index, (label, value, speaker) in enumerate(lines[-visible_count:]):
+                y = transcript_rect.y+48+index*22
+                if label:
+                    _text(self.screen, label, (transcript_rect.x+18, y), 9, CYAN if speaker == 'JARVIS' else TEXT, 'midleft', True)
+                _text(self.screen, value, (transcript_rect.x+112, y), 9, MUTED if speaker == 'JARVIS' else TEXT, 'midleft')
         else:
             max_chars = max(60, width//9)
             for index, (speaker, value) in enumerate(list(self.transcript)[-3:]):
                 y = transcript_rect.y+47+index*24
                 _text(self.screen, f'{speaker} //', (transcript_rect.x+18, y), 9, CYAN if speaker == 'JARVIS' else TEXT, 'midleft', True)
                 _text(self.screen, _ellipsize(value, max_chars), (transcript_rect.x+105, y), 9, MUTED if speaker == 'JARVIS' else TEXT, 'midleft')
-        input_rect = pygame.Rect(margin, height-54, width-margin*2, 36)
+        input_rect = self._input_rect(width, height)
         pygame.draw.rect(self.screen, (3, 15, 22), input_rect)
         pygame.draw.rect(self.screen, CYAN if self.input_focused else CYAN_DARK, input_rect, 1)
         prefix = 'COMMAND // '
         _text(self.screen, prefix, (input_rect.x+12, input_rect.centery), 9, CYAN, 'midleft', True)
         display = self.input_text if self.input_text else 'Type a command and press Enter...'
         color = TEXT if self.input_text else MUTED
-        max_chars = max(20, (input_rect.width-125)//8)
-        _text(self.screen, _ellipsize(display, max_chars), (input_rect.x+108, input_rect.centery), 9, color, 'midleft')
+        text_x = input_rect.x+108
+        text_width = input_rect.width-132
+        max_chars = max(20, text_width//8)
+        visible_line = _ellipsize(display, max_chars)
+        _text(self.screen, visible_line, (text_x, input_rect.centery), 9, color, 'midleft')
         if self.input_focused and (self.phase//15) % 2 == 0:
-            cursor_x = min(input_rect.right-12, input_rect.x+108+_font(9).size(self.input_text)[0]+2)
-            pygame.draw.line(self.screen, CYAN, (cursor_x, input_rect.y+9), (cursor_x, input_rect.bottom-9), 1)
+            cursor_x = min(input_rect.right-14, text_x+_font(9).size(visible_line)[0]+2)
+            pygame.draw.line(self.screen, CYAN, (cursor_x, input_rect.y+9), (cursor_x, input_rect.y+25), 1)

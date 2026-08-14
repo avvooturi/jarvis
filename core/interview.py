@@ -58,7 +58,15 @@ class InterviewSession:
             'turns': [{'candidate': u, 'interviewer': a} for u, a in self.turns],
             'evaluation': evaluation,
         }, indent=2), encoding='utf-8')
+        result = {
+            'started_at': self.started_at,
+            'ended_at': ended_at,
+            'duration_seconds': duration,
+            'turns': list(self.turns),
+            'evaluation': evaluation,
+            'report_path': markdown_path,
+        }
         self.active = False
         self.started_at = None
         self.turns = []
-        return markdown_path
+        return result

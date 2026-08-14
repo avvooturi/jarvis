@@ -38,6 +38,7 @@ class Config:
     hotkey: str
     default_personality: str
     personalities_dir: Path
+    memory_db_path: Path
 
     @classmethod
     def load(cls) -> 'Config':
@@ -67,4 +68,5 @@ class Config:
             hotkey=_get_env('HOTKEY', 'f8'),
             default_personality=_get_env('DEFAULT_PERSONALITY', 'jarvis'),
             personalities_dir=Path(_get_env('PERSONALITIES_DIR', 'personalities')),
+            memory_db_path=Path(_get_env('MEMORY_DB_PATH', 'data/jarvis_memory.db')),
         )

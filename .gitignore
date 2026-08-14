@@ -5,3 +5,5 @@ __pycache__/
 .env
 temp_recording_*.wav
 interview_sessions/
+data/
+*.db
