@@ -397,21 +397,25 @@ class HudWindow:
         pygame.draw.rect(self.screen, CYAN_DARK, expand_rect, 1)
         _text(self.screen, 'COLLAPSE' if self.exchange_expanded else 'EXPAND', expand_rect.center, 8, CYAN, 'center', True)
         if not self.transcript:
-            _text(self.screen, 'SYSTEM // Voice channel ready. Awaiting directive.', (transcript_rect.x+18, transcript_rect.y+62), 9, MUTED, 'midleft')
+            empty_size = 14 if self.exchange_expanded else 9
+            _text(self.screen, 'SYSTEM // Voice channel ready. Awaiting directive.', (transcript_rect.x+18, transcript_rect.y+62), empty_size, MUTED, 'midleft')
         elif self.exchange_expanded:
-            max_chars = max(60, (transcript_rect.width-145)//8)
+            expanded_font_size = 14
+            expanded_line_height = 30
+            message_x = transcript_rect.x+132
+            max_chars = max(40, (transcript_rect.right-message_x-20)//9)
             lines = []
             for speaker, value in self.transcript:
                 wrapped = _wrap_text(value, max_chars)
                 lines.append((f'{speaker} //', wrapped[0], speaker))
                 lines.extend(('', line, speaker) for line in wrapped[1:])
                 lines.append(('', '', speaker))
-            visible_count = max(1, (transcript_rect.height-62)//22)
+            visible_count = max(1, (transcript_rect.height-62)//expanded_line_height)
             for index, (label, value, speaker) in enumerate(lines[-visible_count:]):
-                y = transcript_rect.y+48+index*22
+                y = transcript_rect.y+50+index*expanded_line_height
                 if label:
-                    _text(self.screen, label, (transcript_rect.x+18, y), 9, CYAN if speaker == 'JARVIS' else TEXT, 'midleft', True)
-                _text(self.screen, value, (transcript_rect.x+112, y), 9, MUTED if speaker == 'JARVIS' else TEXT, 'midleft')
+                    _text(self.screen, label, (transcript_rect.x+18, y), expanded_font_size, CYAN if speaker == 'JARVIS' else TEXT, 'midleft', True)
+                _text(self.screen, value, (message_x, y), expanded_font_size, MUTED if speaker == 'JARVIS' else TEXT, 'midleft')
         else:
             max_chars = max(60, width//9)
             for index, (speaker, value) in enumerate(list(self.transcript)[-3:]):
