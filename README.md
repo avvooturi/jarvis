@@ -1,173 +1,322 @@
 # Jarvis Voice Assistant
 
-A simple Windows desktop voice assistant prototype that uses local audio capture, `faster-whisper` speech-to-text, Hermes Agent in WSL for reasoning, and local TTS for spoken responses.
+Jarvis is a Windows desktop voice assistant with a real-time heads-up display. It listens through the microphone, transcribes speech locally, decides how a request should be handled, gets a response from an AI model, displays the exchange, and reads the answer aloud.
+
+The project is a practical personal-assistant prototype. It combines a responsive local interface with Hermes Agent in WSL for requests that may require tools, an optional low-latency OpenRouter route for ordinary conversation, persistent local memory, and a dedicated system-design interview coach.
+
+## What Jarvis Does
+
+A normal voice request follows this pipeline:
+
+1. Press the configured hotkey (default `F8`) or click the HUD core to begin recording.
+2. Press or click again to stop.
+3. Jarvis saves the captured microphone audio to a temporary WAV file.
+4. `faster-whisper` transcribes the recording locally.
+5. Jarvis checks for built-in commands and locally handled Spotify requests.
+6. The request router chooses either the optional fast conversation model or Hermes Agent.
+7. The response is added to conversation history and shown in the HUD.
+8. `pyttsx3` speaks the answer through Windows text-to-speech.
+9. The temporary recording is removed after transcription.
+
+Typed requests skip recording and transcription but otherwise use the same command, routing, memory, display, and speech pipeline.
+
+### Voice and text input
+
+- Global push-to-talk using `F8` by default.
+- Clickable animated HUD core and `Space` as in-window recording controls.
+- A `COMMAND //` field for typed prompts and slash commands.
+- Local English speech recognition through `faster-whisper`.
+- Voice activity detection to reduce silence in transcriptions.
+- A background request worker so the graphical interface stays responsive.
+- Busy-state protection that prevents overlapping recordings and requests.
+
+### Spoken responses
+
+Jarvis uses `pyttsx3` and the Windows speech engine, so speech synthesis is local. A preferred installed voice can be selected by name. Short answers use the normal configured speaking rate; answers above a configurable word threshold use a faster rate.
+
+Use `/mute` to keep receiving answers in the HUD without hearing them, and `/unmute` to restore speech.
+
+### Intelligent request routing
+
+Jarvis has two AI response paths:
+
+- **Fast conversation route:** If `OPENROUTER_API_KEY` is configured, ordinary questions are sent directly to the model in `FAST_MODEL`. This route uses recent conversation context and is optimized for short spoken answers.
+- **Hermes Agent route:** Requests that appear to involve files, applications, websites, device actions, execution, installation, downloads, email, or scheduling are sent to Hermes in WSL with a larger tool-turn budget. Hermes is also the fallback when the fast route is disabled or fails.
+
+The router is intentionally lightweight and keyword based. It helps choose a path; it is not a security boundary or a complete intent classifier. Hermes' actual abilities depend on the tools, permissions, provider, and configuration available inside your WSL installation.
+
+Without an OpenRouter API key in the Windows `.env`, all non-local AI requests go through Hermes.
+
+### Persistent memory
+
+Jarvis saves conversations and interview results to a local SQLite database at `data/jarvis_memory.db` by default. On startup it restores the five most recent normal assistant exchanges as conversational context.
+
+Stored conversation records include the session, timestamp, operating mode, active personality, user text, and assistant response. Completed interview records also include the transcript, duration, evaluation, and any rubric scores extracted from the evaluation. Jarvis uses those scores to summarize strengths, priority areas, and changes over time.
+
+Memory management commands are described in [Commands](#commands). `/forgetall` requires a separate confirmation command before permanent deletion.
+
+### System-design interview coach
+
+Interview mode turns Jarvis into a concise senior distributed-systems interviewer. It selects a realistic design problem and expects the candidate to lead. The interviewer progresses through:
+
+- Requirements and scope.
+- Capacity and traffic estimation.
+- APIs and data modeling.
+- High-level architecture.
+- Scalability and reliability.
+- Bottlenecks, deep dives, and tradeoffs.
+- Communication and justification of decisions.
+
+Jarvis asks one focused question at a time and avoids revealing a complete solution. `/hint` provides a small nudge based on the current discussion. Normal assistant history is kept separate from the active interview transcript.
+
+When `/endinterview` is used, Jarvis generates a Markdown evaluation with 1–5 scores across nine categories: requirements, estimation, API design, data model, architecture, scalability, reliability, tradeoffs, and communication. It saves a readable Markdown report, a structured JSON report, and the evaluation and extracted scores in SQLite.
+
+Reports are written to `interview_sessions/`. Previous performance is summarized into a compact learning profile that can inform later interviews.
+
+### Personalities
+
+The default Jarvis personality is calm, concise, and professional. The included Eve personality is more casual, friendly, and energetic. Personality definitions are YAML files in `personalities/`, making their prompts easy to adjust. Personality affects ordinary responses; interview mode uses its own interviewer prompt.
+
+### Spotify handling
+
+Requests such as “play Daft Punk on Spotify” are handled locally. Jarvis opens a Spotify search using the desktop-app URI on Windows, falling back to a browser search if necessary.
+
+This is search launching, not authenticated playback control. Jarvis cannot currently control an account, choose a device, manage playlists, or guarantee that playback starts. Those capabilities require Spotify OAuth and an API integration.
+
+### Heads-up display
+
+The Pygame HUD provides visual feedback for idle, listening, transcribing, thinking, speaking, and error states. It also displays system telemetry, an animated waveform and central core, the current model, personality and mode, recent exchanges, and the interview learning profile. The recent-exchange panel can be expanded for additional history.
+
+Press `F11` to toggle full-screen mode and `Escape` to close Jarvis.
 
 ## Architecture
 
-- `main.py` - application entrypoint and hotkey/recording loop.
-- `config.py` - loads environment-based configuration.
-- `core/audio.py` - microphone recording and temporary WAV file handling.
-- `core/stt.py` - speech recognition wrapper using `faster-whisper`.
-- `core/hermes_client.py` - bridge to Hermes Agent running in WSL via CLI.
-- `core/tts.py` - abstracted text-to-speech interface using `pyttsx3`.
-- `core/conversation.py` - conversation context, personalities, and command handling.
-- `gui/hud.py` - animated Pygame JARVIS HUD, telemetry, waveform, and transcript display.
-- `personalities/` - YAML personality prompts for Jarvis and Eve.
+```text
+Microphone / typed command
+          |
+          v
+  Audio capture + local Whisper STT
+          |
+          v
+  Commands / Spotify local handler
+          |
+          v
+     Request router
+       /        \
+Fast OpenRouter  Hermes Agent in WSL
+       \        /
+          v
+ Conversation memory + HUD + local TTS
+```
 
-## Prerequisites
+### Project structure
 
-- Windows PC with a working microphone and speakers.
-- Python 3.10+ installed on Windows.
-- WSL2 installed with a Linux distro named `Ubuntu` by default.
-- Hermes Agent installed and configured in WSL (existing installation is required).
-- OpenRouter configured inside Hermes.
+| Path | Responsibility |
+| --- | --- |
+| `main.py` | Application entry point, HUD lifecycle, hotkey handling, background queue, orchestration, and response delivery. |
+| `config.py` | Loads `.env` values into application configuration. |
+| `core/audio.py` | Captures mono microphone audio and manages temporary WAV recordings. |
+| `core/stt.py` | Wraps `faster-whisper` transcription. |
+| `core/request_router.py` | Detects requests likely to need Hermes tools. |
+| `core/fast_client.py` | Sends low-latency conversational requests directly to OpenRouter. |
+| `core/hermes_client.py` | Invokes the Hermes CLI inside a configured WSL distribution. |
+| `core/conversation.py` | Builds prompts, restores context, switches personalities, and recognizes commands. |
+| `core/memory.py` | Stores sessions, conversations, interviews, evaluations, and scores in SQLite. |
+| `core/interview.py` | Manages interview state and writes Markdown/JSON reports. |
+| `core/spotify.py` | Opens local Spotify searches. |
+| `core/tts.py` | Queues local Windows speech synthesis on a dedicated thread. |
+| `gui/hud.py` | Renders and operates the animated Pygame interface. |
+| `personalities/` | Contains YAML personality prompts. |
+| `tests/` | Unit tests for routing, Hermes, interviews, memory, and TTS. |
+
+## Requirements
+
+- Windows 10 or 11 with a working microphone and speakers.
+- Python 3.10 or newer on Windows.
+- WSL2 with a Linux distribution (`Ubuntu` by default).
+- Hermes Agent installed and configured inside WSL.
+- A model provider configured for Hermes (OpenRouter by default).
+- Internet access for AI model requests and the initial Whisper model download.
+
+Speech recognition and synthesis run locally after their required components are available. AI reasoning is remote through the provider configured for Hermes or OpenRouter; prompts sent to those routes are therefore not fully local.
 
 ## Installation
 
-1. Clone or create the project in `c:\Users\avvoo\OneDrive\Desktop\programming\jarvis`.
-2. Install Python dependencies:
+Open PowerShell and run:
 
 ```powershell
 cd C:\Users\avvoo\OneDrive\Desktop\programming\jarvis
 python -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-3. Copy `.env.example` to `.env` and customize values if needed.
+If `.env` already exists, do not overwrite it. Edit the existing file instead. The first use of a `faster-whisper` model may download model files and take longer than later startups.
 
 ## Configuring Hermes
 
-This project assumes Hermes is already installed in WSL and configured with OpenRouter.
-The assistant invokes Hermes via:
+Jarvis calls Hermes through WSL in the equivalent form:
 
 ```powershell
-wsl -d Ubuntu bash -lc 'hermes chat -q "..." -Q --source tool --ignore-rules --accept-hooks --provider openrouter -m openrouter/auto'
+wsl -d Ubuntu bash -lc 'hermes chat -q "..." -Q --provider openrouter -m openai/gpt-5.4-mini --max-turns 6 ...'
 ```
 
-If your WSL distro name is different, update `HERMES_WSL_DISTRO` in `.env`.
-If your Hermes command is installed somewhere else inside WSL, update `HERMES_COMMAND`.
+Hermes itself must already be authenticated and functional inside WSL. Change `HERMES_WSL_DISTRO` if the distribution is not named `Ubuntu`, and change `HERMES_COMMAND` if the executable uses another command or path. `HERMES_EXTRA_FLAGS` is appended to the command, so review it carefully before changing it.
 
-For predictable latency, Jarvis uses a fixed Hermes model, a 60-second timeout,
-and a small tool-turn budget. Configure these with `HERMES_MODEL`,
-`HERMES_TIMEOUT`, and `HERMES_MAX_TURNS`.
+## Configuration Reference
 
-### Optional fast conversation route
+Values in `.env` override the application defaults.
 
-Set `OPENROUTER_API_KEY` in `.env` to send ordinary conversational questions
-directly to the low-latency `FAST_MODEL`. Requests that appear to require files,
-applications, or other tools continue to use Hermes. If the key is absent or the
-fast request fails, Jarvis automatically falls back to Hermes.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HERMES_WSL_DISTRO` | `Ubuntu` | WSL distribution containing Hermes. |
+| `HERMES_COMMAND` | `hermes` | Hermes command inside WSL. |
+| `HERMES_PROVIDER` | `openrouter` | Provider passed to Hermes. |
+| `HERMES_MODEL` | `openrouter/auto` in code | Hermes model. `.env.example` selects `openai/gpt-5.4-mini`. |
+| `HERMES_SESSION_NAME` | `jarvis_voice_assistant` | Reserved session label in the current configuration. |
+| `HERMES_EXTRA_FLAGS` | `--ignore-rules --accept-hooks --source tool` | Additional Hermes CLI flags. |
+| `HERMES_TIMEOUT` | `60` | Maximum seconds for a Hermes request. |
+| `HERMES_MAX_TURNS` | `6` | Turn budget for tool requests. Ordinary Hermes chat uses one turn. |
+| `OPENROUTER_API_KEY` | empty | Enables the optional direct fast route. |
+| `FAST_MODEL` | `openai/gpt-5.4-nano` | Direct conversational model. |
+| `FAST_TIMEOUT` | `30` | Maximum seconds for a fast-route request. |
+| `WHISPER_MODEL` | `base.en` | `faster-whisper` model name or path. |
+| `WHISPER_DEVICE` | `cpu` | Whisper device, commonly `cpu` or `cuda`. |
+| `WHISPER_COMPUTE_TYPE` | `int8` | Whisper compute precision. |
+| `WHISPER_BEAM_SIZE` | `1` | Transcription beam size; larger values trade speed for accuracy. |
+| `WHISPER_VAD_FILTER` | `true` | Enables silence filtering. |
+| `AUDIO_SAMPLE_RATE` | `16000` | Microphone sample rate in Hz. |
+| `TTS_ENGINE` | `pyttsx3` | Speech engine; currently the only supported value. |
+| `TTS_VOICE` | empty | Substring of an installed Windows voice name. |
+| `TTS_RATE` | `190` | Speaking rate for shorter responses. |
+| `TTS_FAST_RATE` | `230` | Speaking rate for longer responses. |
+| `TTS_FAST_WORD_THRESHOLD` | `50` | Word count above which the faster rate is used. |
+| `HOTKEY` | `f8` | Global push-to-talk toggle. |
+| `DEFAULT_PERSONALITY` | `jarvis` | Personality loaded at startup. |
+| `PERSONALITIES_DIR` | `personalities` | Directory containing personality YAML files. |
+| `MEMORY_DB_PATH` | `data/jarvis_memory.db` | SQLite memory database location. |
 
-## Configuring Whisper
+## Running Jarvis
 
-The default model is `small.en`, with `cpu` and `int8` compute. Change these values in `.env`:
-
-- `WHISPER_MODEL`
-- `WHISPER_DEVICE`
-- `WHISPER_COMPUTE_TYPE`
-- `WHISPER_BEAM_SIZE` (`1` is fastest)
-- `WHISPER_VAD_FILTER` (ignores silence)
-
-For better accuracy and speed, choose a model that fits your local hardware.
-
-## Configuring TTS
-
-By default the assistant uses `pyttsx3` on Windows.
-You can optionally set a preferred `TTS_VOICE` and `TTS_RATE` in `.env`.
-Responses longer than `TTS_FAST_WORD_THRESHOLD` words use `TTS_FAST_RATE`,
-allowing long answers to play faster without rushing short conversational replies.
-
-
-## Spotify
-
-Jarvis handles Spotify access questions locally instead of sending them through
-the general agent. A request such as "play X on Spotify" opens that search in the
-Spotify desktop app. Direct playback and account-level control require a future
-Spotify OAuth integration.
-
-## Running the Assistant
-
-1. Start the assistant:
+From the project directory:
 
 ```powershell
 python main.py
 ```
 
-2. Press the configured hotkey (default `F8`) once to start recording.
-3. Press it again to stop recording and send the transcription to Hermes.
-4. The assistant speaks Hermes' response out loud.
+Then press `F8`, speak, and press `F8` again; click the central HUD core; use `Space` while the HUD is focused; or type into `COMMAND //` and press `Enter`.
 
-The desktop HUD opens automatically and reacts to each pipeline stage: listening,
-transcribing, thinking, speaking, idle, and error. You can also click the central
-core or press Space while the HUD is focused to toggle recording. Press F11 for
-full-screen mode and Escape to close Jarvis.
+Jarvis processes one request at a time. Input submitted while recording or processing is ignored.
 
-Click the `COMMAND //` field at the bottom of the HUD to type requests or slash
-commands, then press Enter. Typed and spoken input share conversation history,
-interview mode, agent routing, transcript display, and voice output.
-Use the `EXPAND` button on `NEURAL LINK // RECENT EXCHANGE` to enlarge the
-conversation history panel. Select `COLLAPSE` to return to the standard HUD.
+## Commands
 
-If `keyboard` cannot capture the hotkey, use the fallback text mode by running the script again. Then type `/record` and press Enter to start/stop audio input.
+Commands can be typed. Several interview and memory commands also recognize natural-language equivalents.
 
-## Switching Personalities
+| Command | Effect |
+| --- | --- |
+| `/jarvis` | Switch to the concise, professional Jarvis personality. |
+| `/eve` | Switch to the friendly, energetic Eve personality. |
+| `/mute` | Stop spoken output while retaining displayed responses. |
+| `/unmute` | Resume spoken output. |
+| `/interview` | Start a system-design interview. |
+| `/hint` | Request one small hint during an active interview. |
+| `/endinterview` | End the interview, evaluate it, and save reports. |
+| `/memory` | Count recent normal turns and summarize learning data. |
+| `/progress` | Show strengths, priorities, and score trends. |
+| `/lastinterview` | Display the latest saved interview evaluation. |
+| `/forgetlast` | Delete the previous saved application session, retaining the current one. |
+| `/forgetall` | Begin deletion of all saved conversations and interview progress. |
+| `/confirmforgetall` | Confirm a pending `/forgetall` operation. |
+| `/quit` | Close Jarvis cleanly. |
 
-Use voice commands during a session:
+## Data and Privacy
 
-- `/jarvis` - switch to the Jarvis personality
-- `/eve` - switch to the Eve personality
-- `/mute` - disable spoken output
-- `/unmute` - re-enable spoken output
-- `/quit` - exit cleanly
+Jarvis creates or may create:
 
-## System Design Interview Mode
+- `data/jarvis_memory.db` for conversation and interview memory.
+- `interview_sessions/*.md` and `*.json` for completed interview reports.
+- `temp_recording_*.wav` while a captured request is waiting for transcription.
 
-Say `/interview` or "start a system design interview" to begin a stateful mock
-interview. Jarvis presents a problem, asks one focused question at a time, and
-challenges requirements, estimates, APIs, data models, architecture, scalability,
-reliability, and tradeoffs without revealing the solution.
+Temporary WAV files are normally deleted immediately after the transcription attempt. A crash or forced shutdown can leave one behind; it can be deleted manually when Jarvis is not running.
 
-- `/hint` or "give me a hint" provides one small nudge.
-- `/endinterview` or "end the interview" generates the final rubric and exits interview mode.
+Microphone transcription uses local Whisper, and speech output uses the local Windows voice engine. Prompt text and recent context are sent to Hermes' configured provider or directly to OpenRouter when the optional fast route is enabled. Do not use the assistant for sensitive material unless that data flow matches your privacy requirements.
 
-Each completed evaluation and transcript is saved locally as Markdown and JSON
-under `interview_sessions/`. That directory is ignored by Git.
+## Testing
 
-## Persistent Memory
+Run the tests from the project directory:
 
-Jarvis stores conversation sessions and structured interview results locally in
-`data/jarvis_memory.db`. On startup it restores a small recent context window;
-interview prompts also receive a compact learning profile based on rubric scores,
-not the entire transcript history. The database and reports are ignored by Git.
+```powershell
+python -m unittest discover -s tests -v
+```
 
-- `/memory` summarizes what is stored and your learning profile.
-- `/progress` shows strengths, priority areas, and score trends.
-- `/lastinterview` retrieves the latest evaluation.
-- `/forgetlast` deletes the previous saved conversation session.
-- `/forgetall` asks for confirmation before deleting all memory and progress.
-- `/confirmforgetall` confirms that permanent deletion.
+Most tests isolate or mock external components, but `tests/test_hermes_client.py` exercises the configured Hermes connection and requires a working WSL/Hermes setup.
 
-## Troubleshooting Windows Microphone/Audio
+## Troubleshooting
 
-- Ensure Windows microphone permissions are enabled for Python.
-- If the hotkey does not work, run the app as administrator or use the fallback `/record` mode.
-- If audio playback fails, verify your default speaker device is configured correctly.
-- For `faster-whisper` issues, ensure the chosen model is downloaded and compatible with `onnxruntime`.
+### The global hotkey does not work
 
-## What Works in V1
+- Click the HUD core or use `Space` while it is focused.
+- Check whether another program has claimed the key.
+- Try another `HOTKEY` value in `.env`.
+- Windows may require elevated privileges for global keyboard hooks in some environments.
 
-- Push-to-talk recording via hotkey or fallback command mode.
-- Local speech-to-text using `faster-whisper`.
-- Hermes Agent integration via WSL CLI.
-- Text response spoken through local speakers.
-- Short conversational context and simple personality switching.
-- Command handling for `/jarvis`, `/eve`, `/mute`, `/unmute`, and `/quit`.
+### The microphone cannot start or records no audio
 
-## Recommended V2
+- Enable Windows microphone access for desktop applications.
+- Confirm that the correct input device is the Windows default.
+- Close software that may have exclusive control of the microphone.
+- Check the terminal log for microphone or audio-frame errors.
 
-- Add a lightweight GUI or tray icon.
-- Add wake-word detection.
-- Add a proper Hermes session manager to preserve context more robustly.
-- Add safe tool architecture for non-destructive system actions.
-- Add a local TTS provider plugin interface for Piper or other voice engines.
-- Add a more reliable audio buffer/recording state machine.
-- Add Windows automation tools behind explicit confirmation.
+### Transcription fails or is slow
+
+- The first run may still be downloading the Whisper model.
+- Confirm that `WHISPER_DEVICE` and `WHISPER_COMPUTE_TYPE` are compatible.
+- Use `cpu` with `int8` for the broadest compatibility.
+- Larger models may improve accuracy but increase memory use and latency.
+- Keep `WHISPER_BEAM_SIZE=1` for the lowest latency.
+
+### Hermes connection fails
+
+- Confirm the distribution name with `wsl -l -v`.
+- Open that distribution and verify that `hermes` runs.
+- Confirm Hermes' provider credentials and selected model.
+- Review the `HERMES_*` values in `.env`.
+- Increase `HERMES_TIMEOUT` if valid requests exceed 60 seconds.
+
+### The fast route is not used
+
+- Set `OPENROUTER_API_KEY` before starting Jarvis.
+- Requests containing action or tool-related keywords intentionally go to Hermes.
+- If the direct request errors, Jarvis automatically falls back to Hermes.
+
+### Jarvis displays an answer but does not speak
+
+- Use `/unmute` in case output was muted.
+- Confirm the default Windows output device and volume.
+- Leave `TTS_VOICE` empty to use the system default.
+- If selecting a voice, use part of its installed display name.
+- Only `pyttsx3` is currently supported as `TTS_ENGINE`.
+
+### Spotify opens a search but does not play
+
+This is expected. The current integration launches a search only and does not have Spotify account authorization or playback control.
+
+## Current Limitations
+
+- There is no wake-word detection; recording must be toggled manually.
+- Speech recognition is configured for English by default.
+- The keyword-based request classifier can misroute ambiguous prompts.
+- Fast-route and Hermes responses rely on external AI providers.
+- Spotify support opens searches but does not control playback.
+- Hermes tool access and safety depend on its separate installation and configuration.
+- Only two personalities and one TTS backend are included.
+- Jarvis handles one request at a time and cannot be interrupted while speaking.
+
+## Possible Next Steps
+
+- Add wake-word detection and a more robust recording state machine.
+- Replace keyword routing with structured intent classification.
+- Add explicit confirmations and permissions for system automation.
+- Implement Spotify OAuth for authenticated playback control.
+- Support additional local TTS engines such as Piper.
+- Add configurable conversation retention and export controls.
+- Improve interruption, cancellation, and request queue behavior.
