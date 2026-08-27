@@ -11,6 +11,7 @@ from core.fast_client import FastChatClient
 from core.hermes_client import HermesClient
 from core.request_router import needs_tools
 from core.spotify import SpotifyHandler
+from core.state import AssistantState, AssistantStateMachine, RequestCancelled
 from core.stt import WhisperTranscriber
 from core.tts import TTS
 from gui import HudWindow
@@ -48,22 +49,22 @@ class VoiceAssistantApp:
         )
         self.conversation = ConversationManager(config)
         self.hotkey = config.hotkey.lower()
-        self.recording = False
-        self.processing = False
         self.running = True
         self._lock = threading.Lock()
         self._debounce_until = 0.0
         self._command_queue = queue.Queue()
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.hud = None
+        self.lifecycle = AssistantStateMachine(self._on_state_changed)
 
     def run(self):
         self.logger.info('Starting voice assistant. Press %s once to start listening, again to stop and send.', self.hotkey.upper())
-        self.logger.info('Use /interview, /endinterview, /hint, /jarvis, /eve, /mute, /unmute, /quit as commands.')
+        self.logger.info('Use /cancel, /interview, /endinterview, /hint, /jarvis, /eve, /mute, /unmute, /quit as commands.')
 
         self.hud = HudWindow(
             on_toggle_recording=self._on_hotkey_pressed,
             on_submit_text=self._on_text_submitted,
+            on_cancel=self._on_cancel_requested,
             on_close=self.stop,
             model=self.config.hermes_model,
             personality=self.conversation.personality,
@@ -87,12 +88,17 @@ class VoiceAssistantApp:
             self.audio_recorder.close()
             self.tts.close()
             self.conversation.memory.close()
+            self.lifecycle.transition(AssistantState.STOPPED, 'Jarvis offline', force=True)
             self.logger.info('Stopped voice assistant.')
 
     def stop(self):
         self.running = False
-        if self.recording:
-            self.recording = False
+        was_recording = self.lifecycle.state == AssistantState.RECORDING
+        self.lifecycle.cancel('Shutting down')
+        self.tts.cancel()
+        self.hermes.cancel()
+        self.fast_chat.cancel()
+        if was_recording:
             self.audio_recorder.close()
 
     def console_loop(self):
@@ -126,45 +132,60 @@ class VoiceAssistantApp:
         self._debounce_until = now + 0.25
 
         with self._lock:
-            if self.recording:
-                self.recording = False
+            if self.lifecycle.state == AssistantState.RECORDING:
                 try:
                     audio_path = self.audio_recorder.stop_recording()
                     self.logger.info('Stopping listening and queueing audio for processing...')
-                    self._set_hud_state('transcribing', 'Decoding voice input')
-                    self.processing = True
+                    self.lifecycle.transition(AssistantState.TRANSCRIBING, 'Decoding voice input')
                     self._command_queue.put(('process_audio', audio_path))
                 except Exception as exc:
                     self.logger.error('Failed to stop recording: %s', exc)
-                    self._set_hud_state('error', 'Microphone capture failed')
+                    self.lifecycle.transition(AssistantState.ERROR, 'Microphone capture failed')
                 return
 
-            if self.processing:
-                self.logger.info('Jarvis is still processing the previous request; recording ignored.')
+            if self.lifecycle.busy:
+                self.logger.info('Jarvis is busy; use /cancel or the HUD cancel control.')
                 return
 
-            self.recording = True
             try:
+                self.lifecycle.transition(AssistantState.RECORDING, 'Voice channel active')
                 self.audio_recorder.start_recording()
                 self.logger.info('Listening...')
-                self._set_hud_state('listening', 'Voice channel active')
             except Exception as exc:
                 self.logger.error('Failed to start recording: %s', exc)
-                self.recording = False
-                self._set_hud_state('error', 'Microphone unavailable')
+                self.lifecycle.transition(AssistantState.ERROR, 'Microphone unavailable')
 
     def _on_text_submitted(self, text):
         text = text.strip()
         if not text:
             return False
+        if text.strip().lower() in {'/cancel', 'cancel', 'stop current request'}:
+            self._on_cancel_requested()
+            return True
         with self._lock:
-            if self.recording or self.processing:
+            if self.lifecycle.busy:
                 self.logger.info('Jarvis is busy; typed command ignored.')
                 return False
-            self.processing = True
+            self.lifecycle.transition(AssistantState.ROUTING, 'Processing typed command')
             self.logger.info('Typed command: %s', text)
-            self._set_hud_state('thinking', 'Processing typed command')
             self._command_queue.put(('process_text', text))
+            return True
+
+    def _on_cancel_requested(self):
+        with self._lock:
+            state = self.lifecycle.state
+            if state == AssistantState.RECORDING:
+                self.lifecycle.cancel('Discarding voice capture')
+                self.audio_recorder.close()
+                self.lifecycle.transition(AssistantState.IDLE, 'Voice capture cancelled')
+                return True
+            if not self.lifecycle.cancel():
+                self.logger.info('There is no active request to cancel.')
+                return False
+            self.logger.info('Cancelling active request...')
+            self.tts.cancel()
+            self.hermes.cancel()
+            self.fast_chat.cancel()
             return True
 
     def process_audio(self, audio_path: str):
@@ -172,19 +193,23 @@ class VoiceAssistantApp:
         self.logger.info('Transcribing audio...')
         self._set_hud_state('transcribing', 'Whisper speech recognition')
         try:
+            self.lifecycle.checkpoint()
             stage_started = time.perf_counter()
             transcript = self.transcriber.transcribe(audio_path)
+            self.lifecycle.checkpoint()
             self.logger.info('Timing: transcription %.2fs', time.perf_counter() - stage_started)
         except Exception as exc:
+            if isinstance(exc, RequestCancelled):
+                raise
             self.logger.error('Speech recognition failed: %s', exc)
-            self._set_hud_state('error', 'Speech recognition failed')
+            self.lifecycle.transition(AssistantState.ERROR, 'Speech recognition failed')
             return
         finally:
             self.audio_recorder.cleanup_file(audio_path)
 
         if not transcript:
             self.logger.warning('No speech was detected.')
-            self._set_hud_state('idle', 'No speech detected')
+            self.lifecycle.transition(AssistantState.IDLE, 'No speech detected')
             return
 
         self.logger.info('Transcript: %s', transcript)
@@ -195,13 +220,16 @@ class VoiceAssistantApp:
         if total_started is None:
             total_started = time.perf_counter()
 
+        self.lifecycle.checkpoint()
+        if self.lifecycle.state == AssistantState.TRANSCRIBING:
+            self.lifecycle.transition(AssistantState.ROUTING, 'Routing voice request')
         command_result = self.conversation.handle_command(transcript)
         if command_result is not None:
             response = self._handle_command_result(command_result)
             if response:
                 self._deliver_response(transcript, response, total_started)
             if self.running:
-                self._set_hud_state('idle', 'Command acknowledged')
+                self.lifecycle.transition(AssistantState.IDLE, 'Command acknowledged')
             return
 
         prompt = self.conversation.build_prompt(transcript)
@@ -225,23 +253,30 @@ class VoiceAssistantApp:
             if action == 'process_audio':
                 try:
                     self.process_audio(payload)
+                except RequestCancelled:
+                    self.logger.info('Voice request cancelled.')
                 except Exception:
                     self.logger.exception('Unexpected error while processing audio.')
                     self._set_hud_state('error', 'Processing fault')
                 finally:
-                    self.processing = False
+                    if self.running and self.lifecycle.state != AssistantState.ERROR:
+                        self.lifecycle.transition(AssistantState.IDLE, 'Standing by', force=True)
             elif action == 'process_text':
                 try:
                     self.process_text(payload)
+                except RequestCancelled:
+                    self.logger.info('Typed request cancelled.')
                 except Exception:
                     self.logger.exception('Unexpected error while processing typed command.')
                     self._set_hud_state('error', 'Processing fault')
                 finally:
-                    self.processing = False
+                    if self.running and self.lifecycle.state != AssistantState.ERROR:
+                        self.lifecycle.transition(AssistantState.IDLE, 'Standing by', force=True)
             elif action == 'quit':
                 self.running = False
 
     def _get_response(self, transcript: str, prompt: str):
+        self.lifecycle.checkpoint()
         if self.spotify.can_handle(transcript):
             response = self.spotify.handle(transcript)
             if response:
@@ -250,6 +285,7 @@ class VoiceAssistantApp:
 
         tool_request = needs_tools(transcript) and not self.conversation.interview.active
         stage_started = time.perf_counter()
+        self.lifecycle.transition(AssistantState.THINKING, 'Selecting response route')
         if not tool_request and self.fast_chat.available:
             self.logger.info('Sending prompt through fast OpenRouter route (%s)...', self.config.fast_model)
             self._set_hud_state('thinking', 'Fast model processing')
@@ -258,20 +294,27 @@ class VoiceAssistantApp:
                     self.conversation.system_prompt + '\nAnswer in at most three concise sentences.',
                     self.conversation.interview.turns if self.conversation.interview.active else self.conversation.history,
                     transcript,
+                    cancel_event=self.lifecycle.cancel_event,
                 )
                 self.logger.info('Fast response received. Timing: model %.2fs', time.perf_counter() - stage_started)
                 return response
+            except RequestCancelled:
+                raise
             except Exception as exc:
+                if self.lifecycle.cancel_event.is_set():
+                    raise RequestCancelled('Fast model request cancelled') from exc
                 self.logger.warning('Fast route failed; falling back to Hermes: %s', exc)
 
         turns = self.config.hermes_max_turns if tool_request else 1
         self.logger.info('Sending prompt to Hermes (max turns: %d)...', turns)
         self._set_hud_state('thinking', 'Hermes agent processing')
         try:
-            response = self.hermes.send(prompt, max_turns=turns)
+            response = self.hermes.send(prompt, max_turns=turns, cancel_event=self.lifecycle.cancel_event)
             self.logger.info('Hermes response received. Timing: model %.2fs', time.perf_counter() - stage_started)
             return response
         except RuntimeError as exc:
+            if self.lifecycle.cancel_event.is_set():
+                raise RequestCancelled('Request cancelled') from exc
             self.logger.error('Hermes request failed: %s', exc)
             self._set_hud_state('error', 'Hermes connection failed')
             return None
@@ -296,6 +339,8 @@ class VoiceAssistantApp:
         elif result['action'] == 'message':
             self.logger.info(result['value'])
             return result['value']
+        elif result['action'] == 'cancel':
+            return 'There is no active request to cancel.'
         elif result['action'] == 'interview_start':
             self.conversation.interview.start()
             if self.hud is not None:
@@ -315,9 +360,14 @@ class VoiceAssistantApp:
                     evaluation = self.fast_chat.send(
                         'You are a candid senior system-design interview evaluator.', [], evaluation_prompt,
                         max_tokens=900,
+                        cancel_event=self.lifecycle.cancel_event,
                     )
                 else:
-                    evaluation = self.hermes.send(evaluation_prompt, max_turns=1)
+                    evaluation = self.hermes.send(
+                        evaluation_prompt, max_turns=1, cancel_event=self.lifecycle.cancel_event,
+                    )
+            except RequestCancelled:
+                raise
             except Exception as exc:
                 self.logger.error('Interview evaluation failed: %s', exc)
                 return 'The interview ended, but I could not generate the evaluation.'
@@ -353,6 +403,7 @@ class VoiceAssistantApp:
 
     def _deliver_response(self, transcript, response, total_started):
         self.logger.info('Response ready for delivery.')
+        self.lifecycle.checkpoint()
         self.conversation.add_turn(transcript, response)
         if self.hud is not None:
             self.hud.add_exchange(transcript, response)
@@ -361,19 +412,27 @@ class VoiceAssistantApp:
             self._set_hud_state('idle', 'Response received // audio muted')
             return
         self.logger.info('Speaking response...')
-        self._set_hud_state('speaking', 'Synthesizing voice response')
+        self.lifecycle.transition(AssistantState.SPEAKING, 'Synthesizing voice response')
         try:
             stage_started = time.perf_counter()
-            self.tts.speak(response)
+            self.tts.speak(response, cancel_event=self.lifecycle.cancel_event)
+            self.lifecycle.checkpoint()
             self.logger.info('Finished speaking response. Timing: TTS %.2fs; total %.2fs', time.perf_counter() - stage_started, time.perf_counter() - total_started)
-            self._set_hud_state('idle', 'Standing by')
+            self.lifecycle.transition(AssistantState.IDLE, 'Standing by')
         except Exception as exc:
+            if isinstance(exc, RequestCancelled):
+                raise
             self.logger.error('Text-to-speech failed: %s', exc)
             self._set_hud_state('error', 'Voice synthesis failed')
 
     def _set_hud_state(self, state: str, detail: str = None):
+        mapping = {'listening': AssistantState.RECORDING}
+        target = mapping.get(state, state)
+        self.lifecycle.transition(target, detail)
+
+    def _on_state_changed(self, state, detail):
         if self.hud is not None:
-            self.hud.set_state(state, detail)
+            self.hud.set_state(state.value, detail)
 
 
 

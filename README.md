@@ -124,6 +124,7 @@ Fast OpenRouter  Hermes Agent in WSL
 | `core/memory.py` | Stores sessions, conversations, interviews, evaluations, and scores in SQLite. |
 | `core/interview.py` | Manages interview state and writes Markdown/JSON reports. |
 | `core/spotify.py` | Opens local Spotify searches. |
+| `core/state.py` | Owns validated lifecycle transitions and the cancellation signal for the active request. |
 | `core/tts.py` | Queues local Windows speech synthesis on a dedicated thread. |
 | `gui/hud.py` | Renders and operates the animated Pygame interface. |
 | `personalities/` | Contains YAML personality prompts. |
@@ -217,6 +218,7 @@ Commands can be typed. Several interview and memory commands also recognize natu
 | `/eve` | Switch to the friendly, energetic Eve personality. |
 | `/mute` | Stop spoken output while retaining displayed responses. |
 | `/unmute` | Resume spoken output. |
+| `/cancel` | Cancel the active recording, model request, or spoken response. `Escape` and the HUD cancel button do the same while Jarvis is busy. |
 | `/interview` | Start a system-design interview. |
 | `/hint` | Request one small hint during an active interview. |
 | `/endinterview` | End the interview, evaluate it, and save reports. |
@@ -248,7 +250,7 @@ Run the tests from the project directory:
 python -m unittest discover -s tests -v
 ```
 
-Most tests isolate or mock external components, but `tests/test_hermes_client.py` exercises the configured Hermes connection and requires a working WSL/Hermes setup.
+The tests isolate or mock external components, including the Hermes subprocess, so they do not require live provider access.
 
 ## Troubleshooting
 
@@ -309,7 +311,7 @@ This is expected. The current integration launches a search only and does not ha
 - Spotify support opens searches but does not control playback.
 - Hermes tool access and safety depend on its separate installation and configuration.
 - Only two personalities and one TTS backend are included.
-- Jarvis handles one request at a time and cannot be interrupted while speaking.
+- Jarvis handles one request at a time; the active request can be cancelled before starting another.
 
 ## Possible Next Steps
 

@@ -1,6 +1,10 @@
 import logging
 import shlex
 import subprocess
+import threading
+import time
+
+from core.state import RequestCancelled
 
 
 class HermesClient:
@@ -14,8 +18,10 @@ class HermesClient:
         self.extra_flags = extra_flags
         self.timeout = timeout
         self.max_turns = max_turns
+        self._process = None
+        self._lock = threading.Lock()
 
-    def send(self, prompt: str, max_turns: int = None) -> str:
+    def send(self, prompt: str, max_turns: int = None, cancel_event=None) -> str:
         turns = max_turns if max_turns is not None else self.max_turns
         command = f'{self.hermes_command} chat -q {shlex.quote(prompt)} -Q --provider {shlex.quote(self.provider)} -m {shlex.quote(self.model)} --max-turns {int(turns)}'
         if self.extra_flags:
@@ -25,21 +31,51 @@ class HermesClient:
         self.logger.debug('Executing Hermes command: %s', ' '.join(full_command))
 
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 full_command,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f'Hermes request timed out after {self.timeout}s') from exc
+            with self._lock:
+                self._process = process
+            deadline = time.monotonic() + self.timeout
+            while process.poll() is None:
+                if cancel_event is not None and cancel_event.wait(0.05):
+                    self._terminate(process)
+                    raise RequestCancelled('Hermes request cancelled')
+                if time.monotonic() >= deadline:
+                    self._terminate(process)
+                    raise RuntimeError(f'Hermes request timed out after {self.timeout}s')
+                time.sleep(0.05)
+            stdout, stderr = process.communicate()
+        finally:
+            with self._lock:
+                self._process = None
 
-        if completed.returncode != 0:
-            raise RuntimeError(f'Hermes command failed: {completed.stderr.strip() or completed.stdout.strip()}')
+        if process.returncode != 0:
+            raise RuntimeError(f'Hermes command failed: {stderr.strip() or stdout.strip()}')
 
-        output = completed.stdout.strip()
+        output = stdout.strip()
         lines = [line for line in output.splitlines() if not line.startswith('session_id:')]
         response = '\n'.join(lines).strip()
         if not response:
-            response = completed.stderr.strip()
+            response = stderr.strip()
         return response
+
+    def cancel(self):
+        with self._lock:
+            process = self._process
+        if process is not None and process.poll() is None:
+            self._terminate(process)
+
+    @staticmethod
+    def _terminate(process):
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass

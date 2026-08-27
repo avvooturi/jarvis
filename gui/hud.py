@@ -25,11 +25,15 @@ WARNING = (255, 105, 74)
 
 STATE_LABELS = {
     'idle': 'JARVIS // ONLINE',
+    'recording': 'LISTENING...',
     'listening': 'LISTENING...',
     'transcribing': 'TRANSCRIBING...',
+    'routing': 'ROUTING REQUEST...',
     'thinking': 'PROCESSING...',
     'speaking': 'RESPONDING...',
+    'cancelling': 'CANCELLING...',
     'error': 'SYSTEM ALERT',
+    'stopped': 'OFFLINE',
 }
 
 
@@ -173,9 +177,10 @@ class HudPanel:
 class HudWindow:
     """Thread-safe, state-reactive Pygame HUD for the voice pipeline."""
 
-    def __init__(self, on_toggle_recording, on_submit_text, on_close, model, personality, hotkey='F8'):
+    def __init__(self, on_toggle_recording, on_submit_text, on_cancel, on_close, model, personality, hotkey='F8'):
         self.on_toggle_recording = on_toggle_recording
         self.on_submit_text = on_submit_text
+        self.on_cancel = on_cancel
         self.on_close = on_close
         self.model = model
         self.personality = personality.upper()
@@ -212,7 +217,7 @@ class HudWindow:
             if not self.running:
                 break
             self.phase += 1
-            self.waveform.update(self.state in {'listening', 'speaking'}, self.phase)
+            self.waveform.update(self.state in {'recording', 'listening', 'speaking'}, self.phase)
             self._draw()
             pygame.display.flip()
             self.clock.tick(30)
@@ -250,8 +255,11 @@ class HudWindow:
                     self.input_text = ''
                     self.input_focused = False
                 elif event.key == pygame.K_ESCAPE:
-                    self.on_close()
-                    self.running = False
+                    if self.state not in {'idle', 'error'}:
+                        self.on_cancel()
+                    else:
+                        self.on_close()
+                        self.running = False
                 elif event.key == pygame.K_SPACE and not self.input_focused:
                     self.on_toggle_recording()
                 elif event.key == pygame.K_F11:
@@ -263,12 +271,17 @@ class HudWindow:
                 input_rect = self._input_rect(width, height)
                 exchange_rect = self._recent_exchange_rect(width, height)
                 expand_rect = self._exchange_expand_rect(exchange_rect)
+                cancel_rect = self._cancel_rect(width, height)
                 if expand_rect.collidepoint(event.pos):
                     self.exchange_expanded = not self.exchange_expanded
                     self.input_focused = False
                     continue
                 if input_rect.collidepoint(event.pos):
                     self.input_focused = True
+                    continue
+                if cancel_rect.collidepoint(event.pos) and self.state not in {'idle', 'error'}:
+                    self.on_cancel()
+                    self.input_focused = False
                     continue
                 self.input_focused = False
                 cx, cy = width/2, 70+(height-240)*0.43
@@ -285,6 +298,10 @@ class HudWindow:
         if self.exchange_expanded:
             return pygame.Rect(28, 58, width-56, height-124)
         return pygame.Rect(28, height-180, width-56, 112)
+
+    @staticmethod
+    def _cancel_rect(width, height):
+        return pygame.Rect(width//2-62, height-238, 124, 28)
 
     @staticmethod
     def _exchange_expand_rect(exchange_rect):
@@ -389,6 +406,12 @@ class HudWindow:
         state_color = WARNING if self.state == 'error' else CYAN
         _text(self.screen, STATE_LABELS.get(self.state, self.state.upper()), (cx, cy+radius+38), 13, state_color, 'center', True)
         _text(self.screen, f'PRESS {self.hotkey} OR CLICK CORE TO TOGGLE VOICE CAPTURE', (cx, cy+radius+60), 8, MUTED, 'center')
+
+        cancel_rect = self._cancel_rect(width, height)
+        cancel_active = self.state not in {'idle', 'error'}
+        pygame.draw.rect(self.screen, (38, 17, 19) if cancel_active else (7, 24, 30), cancel_rect)
+        pygame.draw.rect(self.screen, WARNING if cancel_active else CYAN_DARK, cancel_rect, 1)
+        _text(self.screen, 'CANCEL  [ESC]', cancel_rect.center, 9, WARNING if cancel_active else MUTED, 'center', True)
 
         transcript_rect = self._recent_exchange_rect(width, height)
         HudPanel.draw(self.screen, transcript_rect, 'NEURAL LINK // RECENT EXCHANGE')

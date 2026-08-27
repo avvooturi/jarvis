@@ -2,11 +2,15 @@ import logging
 import queue
 import threading
 import gc
+import time
+
+from core.state import RequestCancelled
 
 
 class _SpeechRequest:
-    def __init__(self, text: str):
+    def __init__(self, text: str, cancel_event=None):
         self.text = text
+        self.cancel_event = cancel_event
         self.done = threading.Event()
         self.error = None
 
@@ -26,6 +30,7 @@ class TTS:
         self._ready = threading.Event()
         self._startup_error = None
         self._closed = False
+        self._cancel_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name='JarvisTTS', daemon=True)
         self._thread.start()
 
@@ -49,6 +54,7 @@ class TTS:
                 break
             engine = None
             try:
+                self._cancel_event.clear()
                 # pyttsx3's Windows SAPI driver can remain in a completed but
                 # silent state after runAndWait(). Give every utterance a fresh
                 # engine, created and used entirely on this COM-owning thread.
@@ -61,7 +67,21 @@ class TTS:
                     engine.setProperty('rate', speech_rate)
                 self.logger.info('Speaking %d words at rate %d.', word_count, speech_rate)
                 engine.say(request.text)
-                engine.runAndWait()
+                if hasattr(engine, 'startLoop') and hasattr(engine, 'iterate'):
+                    engine.startLoop(False)
+                    try:
+                        while engine.isBusy():
+                            if self._cancel_event.is_set() or (request.cancel_event is not None and request.cancel_event.is_set()):
+                                engine.stop()
+                                raise RequestCancelled('Speech cancelled')
+                            engine.iterate()
+                            time.sleep(0.01)
+                    finally:
+                        engine.endLoop()
+                else:
+                    engine.runAndWait()
+                    if self._cancel_event.is_set() or (request.cancel_event is not None and request.cancel_event.is_set()):
+                        raise RequestCancelled('Speech cancelled')
             except Exception as exc:
                 request.error = exc
             finally:
@@ -84,18 +104,23 @@ class TTS:
                 return
         self.logger.warning('TTS voice %s not found. Using default voice.', voice_name)
 
-    def speak(self, text: str):
+    def speak(self, text: str, cancel_event=None):
         if not text:
             return
         if self._closed or not self._thread.is_alive():
             raise RuntimeError('TTS engine is not available')
 
-        request = _SpeechRequest(text)
+        request = _SpeechRequest(text, cancel_event)
         self._queue.put(request)
         if not request.done.wait(timeout=180):
             raise RuntimeError('TTS playback timed out')
+        if isinstance(request.error, RequestCancelled):
+            raise request.error
         if request.error is not None:
             raise RuntimeError(f'TTS playback failed: {request.error}') from request.error
+
+    def cancel(self):
+        self._cancel_event.set()
 
     def close(self):
         if self._closed:

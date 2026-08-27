@@ -71,6 +71,8 @@ class ConversationManager:
                 self._confirm_forget_all = False
                 return {'action': 'memory_forget_all'}
             return {'action': 'message', 'value': 'No memory deletion is awaiting confirmation.'}
+        if normalized in {'/cancel', 'cancel', 'stop', 'stop current request'}:
+            return {'action': 'cancel'}
         if normalized in {'/interview', 'slash interview', 'start interview', 'start an interview', 'start system design interview', 'start a system design interview'}:
             return {'action': 'interview_start'}
         if normalized in {'/endinterview', '/end interview', 'slash end interview', 'end interview', 'end the interview', 'finish interview', 'finish the interview'}:
