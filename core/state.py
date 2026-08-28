@@ -7,6 +7,7 @@ class AssistantState(str, Enum):
     RECORDING = 'recording'
     TRANSCRIBING = 'transcribing'
     ROUTING = 'routing'
+    AWAITING_PERMISSION = 'awaiting_permission'
     THINKING = 'thinking'
     SPEAKING = 'speaking'
     CANCELLING = 'cancelling'
@@ -22,13 +23,14 @@ class AssistantStateMachine:
     """Thread-safe lifecycle and cancellation owner for one active request."""
 
     _ALLOWED = {
-        AssistantState.IDLE: {AssistantState.RECORDING, AssistantState.ROUTING, AssistantState.STOPPED},
+        AssistantState.IDLE: {AssistantState.RECORDING, AssistantState.ROUTING, AssistantState.AWAITING_PERMISSION, AssistantState.STOPPED},
         AssistantState.RECORDING: {AssistantState.TRANSCRIBING, AssistantState.CANCELLING, AssistantState.ERROR, AssistantState.IDLE},
         AssistantState.TRANSCRIBING: {AssistantState.ROUTING, AssistantState.CANCELLING, AssistantState.ERROR, AssistantState.IDLE},
-        AssistantState.ROUTING: {AssistantState.THINKING, AssistantState.SPEAKING, AssistantState.CANCELLING, AssistantState.ERROR, AssistantState.IDLE},
+        AssistantState.ROUTING: {AssistantState.THINKING, AssistantState.SPEAKING, AssistantState.AWAITING_PERMISSION, AssistantState.CANCELLING, AssistantState.ERROR, AssistantState.IDLE},
         AssistantState.THINKING: {AssistantState.SPEAKING, AssistantState.CANCELLING, AssistantState.ERROR, AssistantState.IDLE},
         AssistantState.SPEAKING: {AssistantState.CANCELLING, AssistantState.ERROR, AssistantState.IDLE},
         AssistantState.CANCELLING: {AssistantState.IDLE, AssistantState.ERROR, AssistantState.STOPPED},
+        AssistantState.AWAITING_PERMISSION: {AssistantState.ROUTING, AssistantState.IDLE, AssistantState.STOPPED},
         AssistantState.ERROR: {AssistantState.IDLE, AssistantState.RECORDING, AssistantState.ROUTING, AssistantState.STOPPED},
         AssistantState.STOPPED: set(),
     }
@@ -56,7 +58,9 @@ class AssistantStateMachine:
 
     @property
     def busy(self):
-        return self.state not in {AssistantState.IDLE, AssistantState.ERROR, AssistantState.STOPPED}
+        return self.state not in {
+            AssistantState.IDLE, AssistantState.AWAITING_PERMISSION, AssistantState.ERROR, AssistantState.STOPPED,
+        }
 
     def transition(self, new_state, detail=None, force=False):
         new_state = AssistantState(new_state)
@@ -68,7 +72,7 @@ class AssistantStateMachine:
                 return
             if not force and new_state not in self._ALLOWED[self._state]:
                 raise RuntimeError(f'Invalid assistant state transition: {self._state.value} -> {new_state.value}')
-            if self._state in {AssistantState.IDLE, AssistantState.ERROR} and new_state in {AssistantState.RECORDING, AssistantState.ROUTING}:
+            if self._state in {AssistantState.IDLE, AssistantState.AWAITING_PERMISSION, AssistantState.ERROR} and new_state in {AssistantState.RECORDING, AssistantState.ROUTING}:
                 self._cancel_event = threading.Event()
             self._state = new_state
             if detail is not None:

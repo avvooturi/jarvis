@@ -41,6 +41,14 @@ class TestAssistantStateMachine(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             machine.transition(AssistantState.SPEAKING)
 
+    def test_awaiting_permission_accepts_a_new_confirm_command(self):
+        machine = AssistantStateMachine()
+        machine.transition(AssistantState.ROUTING)
+        machine.transition(AssistantState.AWAITING_PERMISSION)
+        self.assertFalse(machine.busy)
+        machine.transition(AssistantState.ROUTING)
+        self.assertEqual(machine.state, AssistantState.ROUTING)
+
 
 if __name__ == '__main__':
     unittest.main()

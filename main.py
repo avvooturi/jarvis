@@ -9,6 +9,7 @@ from core.audio import AudioRecorder
 from core.conversation import ConversationManager
 from core.fast_client import FastChatClient
 from core.hermes_client import HermesClient
+from core.permissions import PermissionManager
 from core.request_router import needs_tools
 from core.spotify import SpotifyHandler
 from core.state import AssistantState, AssistantStateMachine, RequestCancelled
@@ -48,6 +49,7 @@ class VoiceAssistantApp:
             fast_word_threshold=config.tts_fast_word_threshold,
         )
         self.conversation = ConversationManager(config)
+        self.permissions = PermissionManager(config.permission_mode, config.permission_timeout)
         self.hotkey = config.hotkey.lower()
         self.running = True
         self._lock = threading.Lock()
@@ -143,6 +145,10 @@ class VoiceAssistantApp:
                     self.lifecycle.transition(AssistantState.ERROR, 'Microphone capture failed')
                 return
 
+            if self.lifecycle.state == AssistantState.AWAITING_PERMISSION:
+                self.permissions.clear()
+                self.lifecycle.transition(AssistantState.IDLE, 'Previous pending action denied')
+
             if self.lifecycle.busy:
                 self.logger.info('Jarvis is busy; use /cancel or the HUD cancel control.')
                 return
@@ -173,6 +179,7 @@ class VoiceAssistantApp:
 
     def _on_cancel_requested(self):
         with self._lock:
+            pending_permission = self.permissions.clear()
             state = self.lifecycle.state
             if state == AssistantState.RECORDING:
                 self.lifecycle.cancel('Discarding voice capture')
@@ -180,6 +187,11 @@ class VoiceAssistantApp:
                 self.lifecycle.transition(AssistantState.IDLE, 'Voice capture cancelled')
                 return True
             if not self.lifecycle.cancel():
+                if pending_permission is not None:
+                    self.logger.info('Pending permission request cancelled.')
+                    if state == AssistantState.AWAITING_PERMISSION:
+                        self.lifecycle.transition(AssistantState.IDLE, 'Pending action denied')
+                    return True
                 self.logger.info('There is no active request to cancel.')
                 return False
             self.logger.info('Cancelling active request...')
@@ -223,6 +235,31 @@ class VoiceAssistantApp:
         self.lifecycle.checkpoint()
         if self.lifecycle.state == AssistantState.TRANSCRIBING:
             self.lifecycle.transition(AssistantState.ROUTING, 'Routing voice request')
+
+        permission_granted = False
+        permission_assessment = None
+        permission_status, pending = self.permissions.handle_command(transcript)
+        if permission_status == 'confirmed':
+            if pending is None:
+                self._deliver_response(
+                    transcript,
+                    'There is no pending permission request, or the previous approval has expired.',
+                    total_started,
+                )
+                return
+            permission_granted = True
+            permission_assessment = pending.assessment
+            transcript = pending.text
+            self.logger.info('One-time permission granted for %s.', pending.assessment.category)
+            self.lifecycle.transition(AssistantState.ROUTING, 'Permission granted // routing action')
+        elif permission_status == 'denied':
+            message = 'The pending action was denied.' if pending is not None else 'There is no pending action to deny.'
+            self._deliver_response(transcript, message, total_started)
+            return
+        elif self.permissions.pending is not None:
+            self.permissions.clear()
+            self.logger.info('Previous pending permission was discarded because a new request was received.')
+
         command_result = self.conversation.handle_command(transcript)
         if command_result is not None:
             response = self._handle_command_result(command_result)
@@ -232,7 +269,21 @@ class VoiceAssistantApp:
                 self.lifecycle.transition(AssistantState.IDLE, 'Command acknowledged')
             return
 
+        if not permission_granted and not self.conversation.interview.active:
+            permission_assessment = self.permissions.assess(transcript)
+            if permission_assessment.requires_confirmation:
+                pending = self.permissions.request(transcript, permission_assessment)
+                self.logger.info('Awaiting permission for %s.', permission_assessment.category)
+                self._deliver_response(transcript, self.permissions.confirmation_message(pending), total_started)
+                self.lifecycle.transition(AssistantState.AWAITING_PERMISSION, 'Type /confirm or /deny')
+                return
+
         prompt = self.conversation.build_prompt(transcript)
+        if self.permissions.mode != 'off' and permission_assessment is not None and needs_tools(transcript):
+            prompt = (
+                f'{self.permissions.execution_directive(permission_assessment, permission_granted)}\n\n'
+                f'{prompt}'
+            )
         response = self._get_response(transcript, prompt)
         if response is None:
             return
@@ -259,7 +310,7 @@ class VoiceAssistantApp:
                     self.logger.exception('Unexpected error while processing audio.')
                     self._set_hud_state('error', 'Processing fault')
                 finally:
-                    if self.running and self.lifecycle.state != AssistantState.ERROR:
+                    if self.running and self.lifecycle.state not in {AssistantState.ERROR, AssistantState.AWAITING_PERMISSION}:
                         self.lifecycle.transition(AssistantState.IDLE, 'Standing by', force=True)
             elif action == 'process_text':
                 try:
@@ -270,7 +321,7 @@ class VoiceAssistantApp:
                     self.logger.exception('Unexpected error while processing typed command.')
                     self._set_hud_state('error', 'Processing fault')
                 finally:
-                    if self.running and self.lifecycle.state != AssistantState.ERROR:
+                    if self.running and self.lifecycle.state not in {AssistantState.ERROR, AssistantState.AWAITING_PERMISSION}:
                         self.lifecycle.transition(AssistantState.IDLE, 'Standing by', force=True)
             elif action == 'quit':
                 self.running = False

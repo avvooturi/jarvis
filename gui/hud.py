@@ -29,6 +29,7 @@ STATE_LABELS = {
     'listening': 'LISTENING...',
     'transcribing': 'TRANSCRIBING...',
     'routing': 'ROUTING REQUEST...',
+    'awaiting_permission': 'AWAITING PERMISSION...',
     'thinking': 'PROCESSING...',
     'speaking': 'RESPONDING...',
     'cancelling': 'CANCELLING...',

@@ -21,6 +21,8 @@ class Config:
     hermes_extra_flags: str
     hermes_timeout: int
     hermes_max_turns: int
+    permission_mode: str
+    permission_timeout: int
     fast_api_key: str
     fast_model: str
     fast_timeout: int
@@ -51,6 +53,8 @@ class Config:
             hermes_extra_flags=_get_env('HERMES_EXTRA_FLAGS', '--ignore-rules --accept-hooks --source tool'),
             hermes_timeout=int(_get_env('HERMES_TIMEOUT', '60')),
             hermes_max_turns=int(_get_env('HERMES_MAX_TURNS', '6')),
+            permission_mode=_get_env('PERMISSION_MODE', 'balanced').lower(),
+            permission_timeout=int(_get_env('PERMISSION_TIMEOUT', '120')),
             fast_api_key=_get_env('OPENROUTER_API_KEY', ''),
             fast_model=_get_env('FAST_MODEL', 'openai/gpt-5.4-nano'),
             fast_timeout=int(_get_env('FAST_TIMEOUT', '30')),

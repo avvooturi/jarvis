@@ -47,6 +47,21 @@ The router is intentionally lightweight and keyword based. It helps choose a pat
 
 Without an OpenRouter API key in the Windows `.env`, all non-local AI requests go through Hermes.
 
+### Permission and confirmation policy
+
+Before a tool-capable request reaches Hermes, Jarvis assigns it one of four risk levels:
+
+- **Read only:** Inspecting or retrieving information without changing external state.
+- **Reversible:** Opening applications or creating, editing, moving, downloading, installing, or executing something.
+- **External:** Sending, publishing, scheduling, purchasing, or otherwise affecting another service or person.
+- **Destructive:** Deleting, wiping, formatting, overwriting, uninstalling, or performing another potentially permanent operation.
+
+In the default `balanced` mode, read-only requests continue automatically while reversible, external, and destructive actions pause. Jarvis displays and speaks the proposed request, its risk, and the reason confirmation is required. `/confirm` approves that exact request once; `/deny`, `/cancel`, or a different new request discards it. Pending approval expires after `PERMISSION_TIMEOUT` seconds.
+
+`strict` mode asks before every tool request, including read-only access. `off` disables permission prompts and should only be used in an environment where the Hermes tool configuration is independently trusted. Approval is also added to the Hermes prompt as a narrow execution boundary; it does not grant standing permission for future requests.
+
+This is an application-level preflight boundary. Hermes and its tools run in a separate WSL process, so their own permissions and safety configuration remain important.
+
 ### Persistent memory
 
 Jarvis saves conversations and interview results to a local SQLite database at `data/jarvis_memory.db` by default. On startup it restores the five most recent normal assistant exchanges as conversational context.
@@ -118,6 +133,7 @@ Fast OpenRouter  Hermes Agent in WSL
 | `core/audio.py` | Captures mono microphone audio and manages temporary WAV recordings. |
 | `core/stt.py` | Wraps `faster-whisper` transcription. |
 | `core/request_router.py` | Detects requests likely to need Hermes tools. |
+| `core/permissions.py` | Classifies tool-action risk and manages expiring, one-time approvals. |
 | `core/fast_client.py` | Sends low-latency conversational requests directly to OpenRouter. |
 | `core/hermes_client.py` | Invokes the Hermes CLI inside a configured WSL distribution. |
 | `core/conversation.py` | Builds prompts, restores context, switches personalities, and recognizes commands. |
@@ -177,6 +193,8 @@ Values in `.env` override the application defaults.
 | `HERMES_EXTRA_FLAGS` | `--ignore-rules --accept-hooks --source tool` | Additional Hermes CLI flags. |
 | `HERMES_TIMEOUT` | `60` | Maximum seconds for a Hermes request. |
 | `HERMES_MAX_TURNS` | `6` | Turn budget for tool requests. Ordinary Hermes chat uses one turn. |
+| `PERMISSION_MODE` | `balanced` | Permission policy: `balanced`, `strict`, or `off`. |
+| `PERMISSION_TIMEOUT` | `120` | Seconds before a pending approval expires. |
 | `OPENROUTER_API_KEY` | empty | Enables the optional direct fast route. |
 | `FAST_MODEL` | `openai/gpt-5.4-nano` | Direct conversational model. |
 | `FAST_TIMEOUT` | `30` | Maximum seconds for a fast-route request. |
@@ -219,6 +237,8 @@ Commands can be typed. Several interview and memory commands also recognize natu
 | `/mute` | Stop spoken output while retaining displayed responses. |
 | `/unmute` | Resume spoken output. |
 | `/cancel` | Cancel the active recording, model request, or spoken response. `Escape` and the HUD cancel button do the same while Jarvis is busy. |
+| `/confirm` | Grant one-time permission for the exact pending tool request. Common spoken approvals such as “yes” and “go ahead” also work. |
+| `/deny` | Reject the pending tool request. Common spoken denials such as “no” also work. |
 | `/interview` | Start a system-design interview. |
 | `/hint` | Request one small hint during an active interview. |
 | `/endinterview` | End the interview, evaluate it, and save reports. |
