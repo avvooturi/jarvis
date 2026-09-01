@@ -422,7 +422,11 @@ class VoiceAssistantApp:
             except Exception as exc:
                 self.logger.error('Interview evaluation failed: %s', exc)
                 return 'The interview ended, but I could not generate the evaluation.'
-            result_data = self.conversation.interview.finish(evaluation)
+            result_data = self.conversation.interview.finish(
+                evaluation,
+                save=self.conversation.memory.persistence_enabled,
+                sanitizer=self.conversation.memory.sanitize,
+            )
             self.conversation.memory.add_interview(
                 result_data['started_at'], result_data['ended_at'], result_data['duration_seconds'],
                 result_data['turns'], result_data['evaluation'],
@@ -430,8 +434,36 @@ class VoiceAssistantApp:
             if self.hud is not None:
                 self.hud.set_mode('ASSISTANT')
                 self.hud.set_progress(self.conversation.memory.learning_profile())
-            self.logger.info('Interview report saved to %s', result_data['report_path'])
+            if result_data['report_path'] is not None:
+                self.logger.info('Interview report saved to %s', result_data['report_path'])
+            else:
+                self.logger.info('Private mode: interview report was not saved.')
             return evaluation
+        elif result['action'] == 'memory_privacy':
+            return self.conversation.memory.privacy_summary()
+        elif result['action'] == 'memory_persistence':
+            self.conversation.memory.set_persistence(result['value'])
+            if result['value']:
+                return 'Persistent memory is enabled. New responses and completed interviews will be saved.'
+            return 'Private mode is enabled. New responses and interview reports will remain session-only.'
+        elif result['action'] == 'memory_search':
+            rows = self.conversation.memory.search_conversations(result['value'])
+            if not rows:
+                return f'No saved memory matched "{result["value"]}".'
+            matches = []
+            for row in rows[:5]:
+                preview = ' '.join(row['user_text'].split())[:100]
+                matches.append(f'ID {row["id"]}: {preview}')
+            return 'Matching memories: ' + '; '.join(matches)
+        elif result['action'] == 'memory_export':
+            path = self.conversation.memory.export_memory()
+            return f'Memory was exported locally to {path}.'
+        elif result['action'] == 'memory_forget_record':
+            removed = self.conversation.memory.delete_conversation(result['value'])
+            if removed:
+                self.conversation.history = self.conversation.memory.recent_conversations(limit=5)
+                return f'Memory record {result["value"]} was permanently deleted.'
+            return f'Memory record {result["value"]} was not found.'
         elif result['action'] == 'memory_summary':
             recent = len(self.conversation.memory.recent_conversations(limit=100))
             return f'I have {recent} recent saved conversation turns. {self.conversation.memory.learning_profile()}'

@@ -39,34 +39,54 @@ class InterviewSession:
         )
         return f'{EVALUATION_PROMPT}\n\nINTERVIEW TRANSCRIPT:\n{transcript or "No substantive answers were recorded."}'
 
-    def finish(self, evaluation):
+    def finish(self, evaluation, save=True, sanitizer=None):
         ended_at = dt.datetime.now()
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
         stamp = (self.started_at or ended_at).strftime('%Y%m%d_%H%M%S')
         markdown_path = self.reports_dir / f'interview_{stamp}.md'
         json_path = self.reports_dir / f'interview_{stamp}.json'
         duration = int((ended_at - (self.started_at or ended_at)).total_seconds())
-        transcript = '\n\n'.join(f'**Candidate:** {u}\n\n**Interviewer:** {a}' for u, a in self.turns)
-        markdown_path.write_text(
-            f'# System Design Interview\n\nDuration: {duration} seconds\n\n## Transcript\n\n{transcript}\n\n## Evaluation\n\n{evaluation}\n',
-            encoding='utf-8',
-        )
-        json_path.write_text(json.dumps({
-            'started_at': self.started_at.isoformat() if self.started_at else None,
-            'ended_at': ended_at.isoformat(),
-            'duration_seconds': duration,
-            'turns': [{'candidate': u, 'interviewer': a} for u, a in self.turns],
-            'evaluation': evaluation,
-        }, indent=2), encoding='utf-8')
+        safe = sanitizer or (lambda value: value)
+        safe_turns = [(safe(user), safe(assistant)) for user, assistant in self.turns]
+        safe_evaluation = safe(evaluation)
+        transcript = '\n\n'.join(f'**Candidate:** {u}\n\n**Interviewer:** {a}' for u, a in safe_turns)
+        if save:
+            self.reports_dir.mkdir(parents=True, exist_ok=True)
+            markdown_path.write_text(
+                f'# System Design Interview\n\nDuration: {duration} seconds\n\n## Transcript\n\n{transcript}\n\n## Evaluation\n\n{safe_evaluation}\n',
+                encoding='utf-8',
+            )
+            json_path.write_text(json.dumps({
+                'started_at': self.started_at.isoformat() if self.started_at else None,
+                'ended_at': ended_at.isoformat(),
+                'duration_seconds': duration,
+                'turns': [{'candidate': u, 'interviewer': a} for u, a in safe_turns],
+                'evaluation': safe_evaluation,
+            }, indent=2), encoding='utf-8')
         result = {
             'started_at': self.started_at,
             'ended_at': ended_at,
             'duration_seconds': duration,
-            'turns': list(self.turns),
-            'evaluation': evaluation,
-            'report_path': markdown_path,
+            'turns': safe_turns,
+            'evaluation': safe_evaluation,
+            'report_path': markdown_path if save else None,
         }
         self.active = False
         self.started_at = None
         self.turns = []
         return result
+
+    def purge_reports(self, retention_days, now=None):
+        if retention_days <= 0 or not self.reports_dir.exists():
+            return 0
+        now = now or dt.datetime.now()
+        cutoff = now.timestamp() - retention_days * 86400
+        removed = 0
+        for pattern in ('interview_*.md', 'interview_*.json'):
+            for path in self.reports_dir.glob(pattern):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+        return removed

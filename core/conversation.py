@@ -16,9 +16,17 @@ class ConversationManager:
         self.personality = config.default_personality
         self.personality_prompt = self._load_personality(self.personality)
         self.interview = InterviewSession()
-        self.memory = MemoryStore(config.memory_db_path)
+        self.memory = MemoryStore(
+            config.memory_db_path,
+            enabled=config.memory_enabled,
+            retention_days=config.memory_retention_days,
+            redact_sensitive=config.memory_redact_sensitive,
+            export_dir=config.memory_export_dir,
+        )
+        self.interview.purge_reports(config.memory_retention_days)
         self.history = self.memory.recent_conversations(limit=5)
         self._confirm_forget_all = False
+        self._confirm_forget_record = None
 
     def _load_personality(self, personality_name: str) -> str:
         persona_file = self.config.personalities_dir / f'{personality_name}.yaml'
@@ -47,14 +55,41 @@ class ConversationManager:
         return self.personality_prompt
 
     def add_turn(self, user_text: str, assistant_text: str):
-        self.history.append((user_text, assistant_text))
+        safe_user = self.memory.sanitize(user_text)
+        safe_assistant = self.memory.sanitize(assistant_text)
+        self.history.append((safe_user, safe_assistant))
         self.interview.add_turn(user_text, assistant_text)
         mode = 'interview' if self.interview.active else 'assistant'
-        self.memory.add_conversation(user_text, assistant_text, mode, self.personality)
+        self.memory.add_conversation(safe_user, safe_assistant, mode, self.personality)
 
     def handle_command(self, text: str):
         lowered = text.strip().lower()
         normalized = lowered.strip(' .!?')
+        if normalized in {'/privacy', 'privacy', 'memory privacy'}:
+            return {'action': 'memory_privacy'}
+        if normalized in {'/private', 'private mode', 'memory off', '/memoryoff'}:
+            return {'action': 'memory_persistence', 'value': False}
+        if normalized in {'/memoryon', 'memory on', 'save memory'}:
+            return {'action': 'memory_persistence', 'value': True}
+        if normalized == '/exportmemory':
+            return {'action': 'memory_export'}
+        if normalized.startswith('/searchmemory '):
+            return {'action': 'memory_search', 'value': text.strip()[len('/searchmemory '):].strip()}
+        if normalized.startswith('/forgetmemory '):
+            raw_id = normalized[len('/forgetmemory '):].strip()
+            if raw_id.isdigit():
+                self._confirm_forget_record = int(raw_id)
+                return {
+                    'action': 'message',
+                    'value': f'This will permanently delete memory record {raw_id}. Type /confirmforgetmemory to continue.',
+                }
+            return {'action': 'message', 'value': 'Use /forgetmemory followed by the numeric memory ID.'}
+        if normalized == '/confirmforgetmemory':
+            if self._confirm_forget_record is None:
+                return {'action': 'message', 'value': 'No individual memory deletion is awaiting confirmation.'}
+            record_id = self._confirm_forget_record
+            self._confirm_forget_record = None
+            return {'action': 'memory_forget_record', 'value': record_id}
         if normalized in {'/memory', 'memory', 'what do you remember about me'}:
             return {'action': 'memory_summary'}
         if normalized in {'/progress', 'progress', 'how have my scores changed', 'what should i practice next'}:

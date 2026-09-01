@@ -41,6 +41,10 @@ class Config:
     default_personality: str
     personalities_dir: Path
     memory_db_path: Path
+    memory_enabled: bool
+    memory_retention_days: int
+    memory_redact_sensitive: bool
+    memory_export_dir: Path
 
     @classmethod
     def load(cls) -> 'Config':
@@ -73,4 +77,8 @@ class Config:
             default_personality=_get_env('DEFAULT_PERSONALITY', 'jarvis'),
             personalities_dir=Path(_get_env('PERSONALITIES_DIR', 'personalities')),
             memory_db_path=Path(_get_env('MEMORY_DB_PATH', 'data/jarvis_memory.db')),
+            memory_enabled=_get_env('MEMORY_ENABLED', 'true').lower() in {'1', 'true', 'yes', 'on'},
+            memory_retention_days=int(_get_env('MEMORY_RETENTION_DAYS', '90')),
+            memory_redact_sensitive=_get_env('MEMORY_REDACT_SENSITIVE', 'true').lower() in {'1', 'true', 'yes', 'on'},
+            memory_export_dir=Path(_get_env('MEMORY_EXPORT_DIR', 'data/exports')),
         )
