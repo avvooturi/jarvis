@@ -15,7 +15,7 @@ class ConversationManager:
         self.history = []
         self.personality = config.default_personality
         self.personality_prompt = self._load_personality(self.personality)
-        self.interview = InterviewSession()
+        self.interview = InterviewSession(config.interview_reports_dir)
         self.memory = MemoryStore(
             config.memory_db_path,
             enabled=config.memory_enabled,
@@ -82,11 +82,12 @@ class ConversationManager:
                 return {
                     'action': 'message',
                     'value': f'This will permanently delete memory record {raw_id}. Type /confirmforgetmemory to continue.',
+                    'remember': False,
                 }
-            return {'action': 'message', 'value': 'Use /forgetmemory followed by the numeric memory ID.'}
+            return {'action': 'message', 'value': 'Use /forgetmemory followed by the numeric memory ID.', 'remember': False}
         if normalized == '/confirmforgetmemory':
             if self._confirm_forget_record is None:
-                return {'action': 'message', 'value': 'No individual memory deletion is awaiting confirmation.'}
+                return {'action': 'message', 'value': 'No individual memory deletion is awaiting confirmation.', 'remember': False}
             record_id = self._confirm_forget_record
             self._confirm_forget_record = None
             return {'action': 'memory_forget_record', 'value': record_id}
@@ -100,12 +101,12 @@ class ConversationManager:
             return {'action': 'memory_forget_last'}
         if normalized in {'/forgetall', '/forget all', 'forget everything'}:
             self._confirm_forget_all = True
-            return {'action': 'message', 'value': 'This will permanently delete all saved conversations and interview progress. Type /confirmforgetall to continue.'}
+            return {'action': 'message', 'value': 'This will permanently delete all saved conversations and interview progress. Type /confirmforgetall to continue.', 'remember': False}
         if normalized in {'/confirmforgetall', '/confirm forget all'}:
             if self._confirm_forget_all:
                 self._confirm_forget_all = False
                 return {'action': 'memory_forget_all'}
-            return {'action': 'message', 'value': 'No memory deletion is awaiting confirmation.'}
+            return {'action': 'message', 'value': 'No memory deletion is awaiting confirmation.', 'remember': False}
         if normalized in {'/cancel', 'cancel', 'stop', 'stop current request'}:
             return {'action': 'cancel'}
         if normalized in {'/interview', 'slash interview', 'start interview', 'start an interview', 'start system design interview', 'start a system design interview'}:

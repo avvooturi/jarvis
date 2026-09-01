@@ -70,6 +70,16 @@ Stored conversation records include the session, timestamp, operating mode, acti
 
 Memory management commands are described in [Commands](#commands). `/forgetall` requires a separate confirmation command before permanent deletion.
 
+#### Privacy and retention controls
+
+Persistent memory can be disabled from configuration with `MEMORY_ENABLED=false` or at runtime with `/private`. While private mode is active, Jarvis keeps enough in-memory context for the running conversation but does not save new turns, interview database records, or Markdown/JSON interview reports. `/memoryon` resumes durable storage for new activity.
+
+By default, stored conversations, interview database records, empty sessions, and interview report files older than 90 days are removed when Jarvis starts. Set `MEMORY_RETENTION_DAYS=0` for unlimited retention or select another number of days.
+
+When sensitive-data redaction is enabled, common API keys, bearer tokens, password/secret assignments, Social Security numbers, and payment-card patterns are replaced before they enter conversation history, SQLite, exports, or interview reports. This is a defense-in-depth filter, not a guarantee that every possible secret format will be recognized.
+
+Use `/privacy` to inspect the active policy and stored-record counts. Saved conversations can be searched by text, exported to local JSON, or deleted individually by numeric ID. Memory-control responses and permission prompts are deliberately excluded from conversation memory.
+
 ### System-design interview coach
 
 Interview mode turns Jarvis into a concise senior distributed-systems interviewer. It selects a realistic design problem and expects the candidate to lead. The interviewer progresses through:
@@ -213,6 +223,11 @@ Values in `.env` override the application defaults.
 | `DEFAULT_PERSONALITY` | `jarvis` | Personality loaded at startup. |
 | `PERSONALITIES_DIR` | `personalities` | Directory containing personality YAML files. |
 | `MEMORY_DB_PATH` | `data/jarvis_memory.db` | SQLite memory database location. |
+| `MEMORY_ENABLED` | `true` | Enables durable memory when Jarvis starts. |
+| `MEMORY_RETENTION_DAYS` | `90` | Deletes older database records and interview reports at startup. Use `0` for unlimited retention. |
+| `MEMORY_REDACT_SENSITIVE` | `true` | Redacts common secrets and sensitive-number patterns before storage. |
+| `MEMORY_EXPORT_DIR` | `data/exports` | Destination for explicit JSON memory exports. |
+| `INTERVIEW_REPORTS_DIR` | `interview_sessions` | Destination for persistent Markdown and JSON interview reports. |
 
 ## Running Jarvis
 
@@ -243,6 +258,13 @@ Commands can be typed. Several interview and memory commands also recognize natu
 | `/hint` | Request one small hint during an active interview. |
 | `/endinterview` | End the interview, evaluate it, and save reports. |
 | `/memory` | Count recent normal turns and summarize learning data. |
+| `/privacy` | Show persistence, retention, redaction, and stored-record status. |
+| `/private` or `/memoryoff` | Stop saving new conversations and interview reports for the current and future requests. |
+| `/memoryon` | Resume persistent storage for new requests. |
+| `/searchmemory QUERY` | Search saved user and assistant text and return matching record IDs. |
+| `/exportmemory` | Export saved conversations and interviews to a timestamped local JSON file. |
+| `/forgetmemory ID` | Request deletion of one saved conversation by ID. |
+| `/confirmforgetmemory` | Confirm the pending individual-record deletion. |
 | `/progress` | Show strengths, priorities, and score trends. |
 | `/lastinterview` | Display the latest saved interview evaluation. |
 | `/forgetlast` | Delete the previous saved application session, retaining the current one. |
@@ -340,5 +362,4 @@ This is expected. The current integration launches a search only and does not ha
 - Add explicit confirmations and permissions for system automation.
 - Implement Spotify OAuth for authenticated playback control.
 - Support additional local TTS engines such as Piper.
-- Add configurable conversation retention and export controls.
 - Improve interruption, cancellation, and request queue behavior.

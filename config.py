@@ -45,6 +45,7 @@ class Config:
     memory_retention_days: int
     memory_redact_sensitive: bool
     memory_export_dir: Path
+    interview_reports_dir: Path
 
     @classmethod
     def load(cls) -> 'Config':
@@ -81,4 +82,5 @@ class Config:
             memory_retention_days=int(_get_env('MEMORY_RETENTION_DAYS', '90')),
             memory_redact_sensitive=_get_env('MEMORY_REDACT_SENSITIVE', 'true').lower() in {'1', 'true', 'yes', 'on'},
             memory_export_dir=Path(_get_env('MEMORY_EXPORT_DIR', 'data/exports')),
+            interview_reports_dir=Path(_get_env('INTERVIEW_REPORTS_DIR', 'interview_sessions')),
         )

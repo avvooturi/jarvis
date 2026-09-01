@@ -245,6 +245,7 @@ class VoiceAssistantApp:
                     transcript,
                     'There is no pending permission request, or the previous approval has expired.',
                     total_started,
+                    remember=False,
                 )
                 return
             permission_granted = True
@@ -254,7 +255,7 @@ class VoiceAssistantApp:
             self.lifecycle.transition(AssistantState.ROUTING, 'Permission granted // routing action')
         elif permission_status == 'denied':
             message = 'The pending action was denied.' if pending is not None else 'There is no pending action to deny.'
-            self._deliver_response(transcript, message, total_started)
+            self._deliver_response(transcript, message, total_started, remember=False)
             return
         elif self.permissions.pending is not None:
             self.permissions.clear()
@@ -264,7 +265,8 @@ class VoiceAssistantApp:
         if command_result is not None:
             response = self._handle_command_result(command_result)
             if response:
-                self._deliver_response(transcript, response, total_started)
+                remember = command_result.get('remember', not command_result['action'].startswith('memory_'))
+                self._deliver_response(transcript, response, total_started, remember=remember)
             if self.running:
                 self.lifecycle.transition(AssistantState.IDLE, 'Command acknowledged')
             return
@@ -274,7 +276,9 @@ class VoiceAssistantApp:
             if permission_assessment.requires_confirmation:
                 pending = self.permissions.request(transcript, permission_assessment)
                 self.logger.info('Awaiting permission for %s.', permission_assessment.category)
-                self._deliver_response(transcript, self.permissions.confirmation_message(pending), total_started)
+                self._deliver_response(
+                    transcript, self.permissions.confirmation_message(pending), total_started, remember=False,
+                )
                 self.lifecycle.transition(AssistantState.AWAITING_PERMISSION, 'Type /confirm or /deny')
                 return
 
@@ -484,10 +488,11 @@ class VoiceAssistantApp:
                 self.hud.set_progress('NO INTERVIEW DATA')
             return 'All saved conversations and interview progress have been permanently deleted.'
 
-    def _deliver_response(self, transcript, response, total_started):
+    def _deliver_response(self, transcript, response, total_started, remember=True):
         self.logger.info('Response ready for delivery.')
         self.lifecycle.checkpoint()
-        self.conversation.add_turn(transcript, response)
+        if remember:
+            self.conversation.add_turn(transcript, response)
         if self.hud is not None:
             self.hud.add_exchange(transcript, response)
         if self.conversation.is_muted:
