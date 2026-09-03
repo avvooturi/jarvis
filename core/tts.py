@@ -105,14 +105,25 @@ class TTS:
         self.logger.warning('TTS voice %s not found. Using default voice.', voice_name)
 
     def speak(self, text: str, cancel_event=None):
+        request = self.speak_async(text, cancel_event)
+        if request is not None:
+            self.wait(request)
+
+    def speak_async(self, text: str, cancel_event=None):
         if not text:
-            return
+            return None
         if self._closed or not self._thread.is_alive():
             raise RuntimeError('TTS engine is not available')
 
         request = _SpeechRequest(text, cancel_event)
         self._queue.put(request)
-        if not request.done.wait(timeout=180):
+        return request
+
+    @staticmethod
+    def wait(request, timeout=180):
+        if request is None:
+            return
+        if not request.done.wait(timeout=timeout):
             raise RuntimeError('TTS playback timed out')
         if isinstance(request.error, RequestCancelled):
             raise request.error
