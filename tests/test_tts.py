@@ -90,6 +90,27 @@ class TestTTS(unittest.TestCase):
         ]
         self.assertEqual(rates, [190, 230])
 
+    def test_async_requests_can_be_queued_then_waited(self):
+        engines = []
+
+        def create_engine():
+            engine = FakeEngine()
+            engines.append(engine)
+            return engine
+
+        with patch.dict(sys.modules, {'pyttsx3': types.SimpleNamespace(init=create_engine)}):
+            tts = TTS()
+            try:
+                first = tts.speak_async('First sentence.')
+                second = tts.speak_async('Second sentence.')
+                tts.wait(first)
+                tts.wait(second)
+            finally:
+                tts.close()
+
+        spoken = [call[1] for engine in engines for call in engine.calls if call[0] == 'say']
+        self.assertEqual(spoken, ['First sentence.', 'Second sentence.'])
+
 
 
 if __name__ == '__main__':

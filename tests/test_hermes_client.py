@@ -1,4 +1,5 @@
 import threading
+import io
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +11,8 @@ class FakeProcess:
     def __init__(self, running=False):
         self.returncode = None if running else 0
         self.terminated = False
+        self.stdout = io.StringIO('session_id: ignored\nFirst line.\nSecond line.\n')
+        self.stderr = io.StringIO('')
 
     def poll(self):
         return self.returncode
@@ -44,6 +47,14 @@ class TestHermesClient(unittest.TestCase):
             with self.assertRaises(RequestCancelled):
                 client.send('Long task', cancel_event=cancelled)
         self.assertTrue(process.terminated)
+
+    def test_stdout_is_streamed_without_session_metadata(self):
+        deltas = []
+        client = HermesClient()
+        with patch('core.hermes_client.subprocess.Popen', return_value=FakeProcess()):
+            result = client.send('Stream this', on_delta=deltas.append)
+        self.assertEqual(deltas, ['First line.\n', 'Second line.\n'])
+        self.assertEqual(result, 'First line.\nSecond line.')
 
 
 if __name__ == '__main__':

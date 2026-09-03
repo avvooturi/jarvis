@@ -14,6 +14,7 @@ from core.request_router import needs_tools
 from core.spotify import SpotifyHandler
 from core.state import AssistantState, AssistantStateMachine, RequestCancelled
 from core.stt import WhisperTranscriber
+from core.streaming import SentenceBuffer
 from core.tts import TTS
 from gui import HudWindow
 
@@ -58,6 +59,10 @@ class VoiceAssistantApp:
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.hud = None
         self.lifecycle = AssistantStateMachine(self._on_state_changed)
+        self._stream_text = ''
+        self._speech_buffer = SentenceBuffer()
+        self._speech_requests = []
+        self._streaming_started = False
 
     def run(self):
         self.logger.info('Starting voice assistant. Press %s once to start listening, again to stop and send.', self.hotkey.upper())
@@ -288,6 +293,7 @@ class VoiceAssistantApp:
                 f'{self.permissions.execution_directive(permission_assessment, permission_granted)}\n\n'
                 f'{prompt}'
             )
+        self._reset_streaming()
         response = self._get_response(transcript, prompt)
         if response is None:
             return
@@ -310,6 +316,7 @@ class VoiceAssistantApp:
                     self.process_audio(payload)
                 except RequestCancelled:
                     self.logger.info('Voice request cancelled.')
+                    self._cancel_streaming_display()
                 except Exception:
                     self.logger.exception('Unexpected error while processing audio.')
                     self._set_hud_state('error', 'Processing fault')
@@ -321,6 +328,7 @@ class VoiceAssistantApp:
                     self.process_text(payload)
                 except RequestCancelled:
                     self.logger.info('Typed request cancelled.')
+                    self._cancel_streaming_display()
                 except Exception:
                     self.logger.exception('Unexpected error while processing typed command.')
                     self._set_hud_state('error', 'Processing fault')
@@ -330,7 +338,7 @@ class VoiceAssistantApp:
             elif action == 'quit':
                 self.running = False
 
-    def _get_response(self, transcript: str, prompt: str):
+    def _get_response(self, transcript: str, prompt: str, stream=True):
         self.lifecycle.checkpoint()
         if self.spotify.can_handle(transcript):
             response = self.spotify.handle(transcript)
@@ -350,6 +358,7 @@ class VoiceAssistantApp:
                     self.conversation.interview.turns if self.conversation.interview.active else self.conversation.history,
                     transcript,
                     cancel_event=self.lifecycle.cancel_event,
+                    on_delta=(lambda delta: self._on_model_delta(transcript, delta)) if stream else None,
                 )
                 self.logger.info('Fast response received. Timing: model %.2fs', time.perf_counter() - stage_started)
                 return response
@@ -358,13 +367,22 @@ class VoiceAssistantApp:
             except Exception as exc:
                 if self.lifecycle.cancel_event.is_set():
                     raise RequestCancelled('Fast model request cancelled') from exc
+                if self._streaming_started:
+                    self.tts.cancel()
+                    self._cancel_streaming_display()
+                    self.lifecycle.transition(AssistantState.THINKING, 'Falling back to Hermes', force=True)
                 self.logger.warning('Fast route failed; falling back to Hermes: %s', exc)
 
         turns = self.config.hermes_max_turns if tool_request else 1
         self.logger.info('Sending prompt to Hermes (max turns: %d)...', turns)
         self._set_hud_state('thinking', 'Hermes agent processing')
         try:
-            response = self.hermes.send(prompt, max_turns=turns, cancel_event=self.lifecycle.cancel_event)
+            response = self.hermes.send(
+                prompt,
+                max_turns=turns,
+                cancel_event=self.lifecycle.cancel_event,
+                on_delta=(lambda delta: self._on_model_delta(transcript, delta)) if stream else None,
+            )
             self.logger.info('Hermes response received. Timing: model %.2fs', time.perf_counter() - stage_started)
             return response
         except RuntimeError as exc:
@@ -402,10 +420,10 @@ class VoiceAssistantApp:
                 self.hud.set_mode('INTERVIEW')
             self.logger.info('System-design interview mode started.')
             prompt_text = 'Begin the interview now. Choose one realistic system-design problem, state it briefly, and ask me to clarify requirements.'
-            return self._get_response(prompt_text, self.conversation.build_prompt(prompt_text))
+            return self._get_response(prompt_text, self.conversation.build_prompt(prompt_text), stream=False)
         elif result['action'] == 'interview_hint':
             prompt_text = 'Give me one small hint based on where I am stuck, without revealing the solution.'
-            return self._get_response(prompt_text, self.conversation.build_prompt(prompt_text))
+            return self._get_response(prompt_text, self.conversation.build_prompt(prompt_text), stream=False)
         elif result['action'] == 'interview_end':
             self.logger.info('Generating system-design interview evaluation...')
             self._set_hud_state('thinking', 'Evaluating interview performance')
@@ -491,27 +509,74 @@ class VoiceAssistantApp:
     def _deliver_response(self, transcript, response, total_started, remember=True):
         self.logger.info('Response ready for delivery.')
         self.lifecycle.checkpoint()
+        was_streaming = self._streaming_started
         if remember:
             self.conversation.add_turn(transcript, response)
         if self.hud is not None:
-            self.hud.add_exchange(transcript, response)
+            if was_streaming:
+                self.hud.finish_stream(response)
+            else:
+                self.hud.add_exchange(transcript, response)
         if self.conversation.is_muted:
             self.logger.info('Muted: response not spoken.')
             self._set_hud_state('idle', 'Response received // audio muted')
+            self._reset_streaming()
             return
         self.logger.info('Speaking response...')
         self.lifecycle.transition(AssistantState.SPEAKING, 'Synthesizing voice response')
         try:
             stage_started = time.perf_counter()
-            self.tts.speak(response, cancel_event=self.lifecycle.cancel_event)
+            if was_streaming:
+                remainder = self._speech_buffer.flush()
+                if remainder:
+                    self._speech_requests.append(
+                        self.tts.speak_async(remainder, cancel_event=self.lifecycle.cancel_event)
+                    )
+                for request in self._speech_requests:
+                    self.tts.wait(request)
+            else:
+                self.tts.speak(response, cancel_event=self.lifecycle.cancel_event)
             self.lifecycle.checkpoint()
             self.logger.info('Finished speaking response. Timing: TTS %.2fs; total %.2fs', time.perf_counter() - stage_started, time.perf_counter() - total_started)
             self.lifecycle.transition(AssistantState.IDLE, 'Standing by')
+            self._reset_streaming()
         except Exception as exc:
             if isinstance(exc, RequestCancelled):
                 raise
             self.logger.error('Text-to-speech failed: %s', exc)
             self._set_hud_state('error', 'Voice synthesis failed')
+            self._reset_streaming()
+
+    def _reset_streaming(self):
+        self._stream_text = ''
+        self._speech_buffer = SentenceBuffer()
+        self._speech_requests = []
+        self._streaming_started = False
+
+    def _on_model_delta(self, transcript, delta):
+        self.lifecycle.checkpoint()
+        if not delta:
+            return
+        self._stream_text += delta
+        if not self._streaming_started:
+            self._streaming_started = True
+            if self.hud is not None:
+                self.hud.begin_stream(transcript)
+        if self.hud is not None:
+            self.hud.update_stream(self._stream_text)
+        if self.conversation.is_muted:
+            return
+        for sentence in self._speech_buffer.add(delta):
+            if self.lifecycle.state == AssistantState.THINKING:
+                self.lifecycle.transition(AssistantState.SPEAKING, 'Streaming voice response')
+            self._speech_requests.append(
+                self.tts.speak_async(sentence, cancel_event=self.lifecycle.cancel_event)
+            )
+
+    def _cancel_streaming_display(self):
+        if self._streaming_started and self.hud is not None:
+            self.hud.cancel_stream()
+        self._reset_streaming()
 
     def _set_hud_state(self, state: str, detail: str = None):
         mapping = {'listening': AssistantState.RECORDING}

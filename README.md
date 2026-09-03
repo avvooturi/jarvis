@@ -34,7 +34,11 @@ Typed requests skip recording and transcription but otherwise use the same comma
 
 Jarvis uses `pyttsx3` and the Windows speech engine, so speech synthesis is local. A preferred installed voice can be selected by name. Short answers use the normal configured speaking rate; answers above a configurable word threshold use a faster rate.
 
-Use `/mute` to keep receiving answers in the HUD without hearing them, and `/unmute` to restore speech.
+Model responses stream into the recent-exchange panel as they arrive. Jarvis buffers those deltas until it sees a complete sentence, then queues that sentence for speech while the model continues generating the rest of the answer. This reduces the delay before both visible and spoken output begins.
+
+OpenRouter provides token-level SSE updates. Hermes output is displayed one stdout line at a time because it is produced by the separate CLI process. Final conversation memory is written only after the complete response succeeds.
+
+Use `/mute` to keep receiving streamed answers in the HUD without hearing them, and `/unmute` to restore speech. `/cancel`, the HUD cancel control, or `Escape` while busy closes the active model stream, terminates Hermes when applicable, stops the current utterance, and rejects speech that is still queued.
 
 ### Intelligent request routing
 
@@ -151,6 +155,7 @@ Fast OpenRouter  Hermes Agent in WSL
 | `core/interview.py` | Manages interview state and writes Markdown/JSON reports. |
 | `core/spotify.py` | Opens local Spotify searches. |
 | `core/state.py` | Owns validated lifecycle transitions and the cancellation signal for the active request. |
+| `core/streaming.py` | Buffers model deltas into complete sentences for incremental speech. |
 | `core/tts.py` | Queues local Windows speech synthesis on a dedicated thread. |
 | `gui/hud.py` | Renders and operates the animated Pygame interface. |
 | `personalities/` | Contains YAML personality prompts. |
@@ -362,4 +367,3 @@ This is expected. The current integration launches a search only and does not ha
 - Add explicit confirmations and permissions for system automation.
 - Implement Spotify OAuth for authenticated playback control.
 - Support additional local TTS engines such as Piper.
-- Improve interruption, cancellation, and request queue behavior.

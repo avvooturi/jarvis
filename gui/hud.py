@@ -230,6 +230,18 @@ class HudWindow:
     def add_exchange(self, user_text, assistant_text):
         self.events.put(('exchange', user_text, assistant_text))
 
+    def begin_stream(self, user_text):
+        self.events.put(('stream_begin', user_text))
+
+    def update_stream(self, assistant_text):
+        self.events.put(('stream_update', assistant_text))
+
+    def finish_stream(self, assistant_text):
+        self.events.put(('stream_finish', assistant_text))
+
+    def cancel_stream(self):
+        self.events.put(('stream_cancel',))
+
     def set_personality(self, personality):
         self.events.put(('personality', personality))
 
@@ -330,6 +342,19 @@ class HudWindow:
                 self.last_command = user_text
                 self.transcript.append(('USER', user_text))
                 self.transcript.append(('JARVIS', assistant_text))
+            elif event[0] == 'stream_begin':
+                user_text = event[1]
+                self.last_command = user_text
+                self.transcript.append(('USER', user_text))
+                self.transcript.append(('JARVIS', ''))
+            elif event[0] in {'stream_update', 'stream_finish'}:
+                assistant_text = event[1]
+                if self.transcript and self.transcript[-1][0] == 'JARVIS':
+                    self.transcript[-1] = ('JARVIS', assistant_text)
+            elif event[0] == 'stream_cancel':
+                if self.transcript and self.transcript[-1][0] == 'JARVIS':
+                    partial = self.transcript[-1][1].rstrip()
+                    self.transcript[-1] = ('JARVIS', f'{partial} [cancelled]'.strip())
             elif event[0] == 'personality':
                 self.personality = event[1].upper()
             elif event[0] == 'mode':

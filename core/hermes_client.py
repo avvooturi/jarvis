@@ -21,7 +21,7 @@ class HermesClient:
         self._process = None
         self._lock = threading.Lock()
 
-    def send(self, prompt: str, max_turns: int = None, cancel_event=None) -> str:
+    def send(self, prompt: str, max_turns: int = None, cancel_event=None, on_delta=None) -> str:
         turns = max_turns if max_turns is not None else self.max_turns
         command = f'{self.hermes_command} chat -q {shlex.quote(prompt)} -Q --provider {shlex.quote(self.provider)} -m {shlex.quote(self.model)} --max-turns {int(turns)}'
         if self.extra_flags:
@@ -39,6 +39,24 @@ class HermesClient:
             )
             with self._lock:
                 self._process = process
+            stdout_lines = []
+            stderr_lines = []
+            readers = []
+            if on_delta is not None:
+                readers = [
+                    threading.Thread(
+                        target=self._read_stream,
+                        args=(process.stdout, stdout_lines, on_delta),
+                        daemon=True,
+                    ),
+                    threading.Thread(
+                        target=self._read_stream,
+                        args=(process.stderr, stderr_lines, None),
+                        daemon=True,
+                    ),
+                ]
+                for reader in readers:
+                    reader.start()
             deadline = time.monotonic() + self.timeout
             while process.poll() is None:
                 if cancel_event is not None and cancel_event.wait(0.05):
@@ -48,7 +66,12 @@ class HermesClient:
                     self._terminate(process)
                     raise RuntimeError(f'Hermes request timed out after {self.timeout}s')
                 time.sleep(0.05)
-            stdout, stderr = process.communicate()
+            if readers:
+                for reader in readers:
+                    reader.join(timeout=2)
+                stdout, stderr = ''.join(stdout_lines), ''.join(stderr_lines)
+            else:
+                stdout, stderr = process.communicate()
         finally:
             with self._lock:
                 self._process = None
@@ -62,6 +85,13 @@ class HermesClient:
         if not response:
             response = stderr.strip()
         return response
+
+    @staticmethod
+    def _read_stream(stream, destination, on_delta):
+        for line in iter(stream.readline, ''):
+            destination.append(line)
+            if on_delta is not None and not line.startswith('session_id:'):
+                on_delta(line)
 
     def cancel(self):
         with self._lock:
